@@ -71,10 +71,14 @@ let swiftTermTarget: Target = .target(
         "Mac/README.md",
         "Apple/Metal/Shaders.metal",
     ],
-    swiftSettings: swiftTermSettings,
-    plugins: [
-        .plugin(name: "SwiftTermBuildInfoPlugin")
-    ]
+    swiftSettings: swiftTermSettings
+    // The build-info plugin is not applied: hosts such as Xogot link extra frameworks
+    // into every product, including plugin tools, which then fail to launch. The
+    // plugin's outputs are committed in Sources/SwiftTerm/Generated instead.
+    // Regenerate them with:
+    //   swift run SwiftTermBuildInfoGenerator "$PWD" \
+    //     Sources/SwiftTerm/Generated/SwiftTermBuildInfo.swift \
+    //     Sources/SwiftTerm/Generated/SwiftTermTerminfo.swift
 )
 
 #if os(Windows)

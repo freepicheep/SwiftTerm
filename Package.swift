@@ -8,6 +8,7 @@ let embeddedCheck = environment["SWIFTTERM_EMBEDDED_CHECK"] == "1"
 let wasmSmokeBuild = environment["SWIFTTERM_WASM"] == "1"
 let webWasmBuild = environment["SWIFTTERM_WEB_WASM"] == "1"
 let webWasmTests = environment["SWIFTTERM_WEB_WASM_TESTS"] == "1"
+let documentationBuild = environment["SWIFTTERM_DOCC"] == "1"
 
 // A package manifest is compiled and run on the HOST, so `os(Linux)` is false
 // when cross-compiling from macOS to Linux. Allow Apple sources to be excluded
@@ -51,7 +52,9 @@ var portableTraitSettings: [SwiftSetting] = [
     .define("SWIFTTERM_WASM", .when(traits: ["Wasm"])),
 ]
 
-var swiftTermSettings: [SwiftSetting] = portableTraitSettings
+// SwiftPM symbol graph generation enables all package traits. Suppress the
+// portable compiler modes so DocC builds the normal host API.
+var swiftTermSettings: [SwiftSetting] = documentationBuild ? [] : portableTraitSettings
 
 if embeddedCheck {
     swiftTermSettings += [

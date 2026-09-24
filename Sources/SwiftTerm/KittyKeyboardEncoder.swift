@@ -7,13 +7,15 @@
 import Foundation
 #endif
 
-enum KittyKey {
+/// A key identity for the kitty keyboard protocol.
+public enum KittyKey: Sendable {
     case unicode(UInt32)
     case functional(KittyFunctionalKey)
     case none
 }
 
-enum KittyFunctionalKey {
+/// A non-text key in the kitty keyboard protocol.
+public enum KittyFunctionalKey: Sendable {
     case escape
     case enter
     case tab
@@ -132,7 +134,7 @@ extension KittyFunctionalKey {
     /// keys are reported only in report-all-keys mode. Caps Lock and Num
     /// Lock are modifiers; Scroll Lock is a regular functional key. This
     /// matches the reference table used by kitty and Ghostty.
-    var isKittyModifierKey: Bool {
+    public var isKittyModifierKey: Bool {
         switch self {
         case .leftShift, .rightShift,
              .leftControl, .rightControl,
@@ -149,23 +151,53 @@ extension KittyFunctionalKey {
     }
 }
 
-struct KittyKeyEvent {
-    var key: KittyKey
-    var modifiers: KittyKeyboardModifiers
-    var eventType: KittyKeyboardEventType
-    var text: String?
-    var shiftedKey: UnicodeScalar?
-    var baseLayoutKey: UnicodeScalar?
-    var composing: Bool = false
+/// One key event for ``KittyKeyboardEncoder``.
+public struct KittyKeyEvent: Sendable {
+    public var key: KittyKey
+    public var modifiers: KittyKeyboardModifiers
+    public var eventType: KittyKeyboardEventType
+    /// Text the key produces, if any.
+    public var text: String?
+    /// The key's character with Shift applied, for alternate-key reporting.
+    public var shiftedKey: UnicodeScalar?
+    /// The key's character on a US layout, for alternate-key reporting.
+    public var baseLayoutKey: UnicodeScalar?
+    /// True while an input method is composing.
+    public var composing: Bool = false
+
+    public init(key: KittyKey, modifiers: KittyKeyboardModifiers, eventType: KittyKeyboardEventType,
+                text: String? = nil, shiftedKey: UnicodeScalar? = nil, baseLayoutKey: UnicodeScalar? = nil,
+                composing: Bool = false) {
+        self.key = key
+        self.modifiers = modifiers
+        self.eventType = eventType
+        self.text = text
+        self.shiftedKey = shiftedKey
+        self.baseLayoutKey = baseLayoutKey
+        self.composing = composing
+    }
 }
 
-struct KittyKeyboardEncoder {
-    let flags: KittyKeyboardFlags
-    let applicationCursor: Bool
-    let applicationKeypad: Bool
-    let backspaceSendsControlH: Bool
+/// Encodes key events for the kitty keyboard protocol and, when no flags are set, legacy xterm.
+///
+/// Hosts outside SwiftTerm's own views build one from ``Terminal/keyboardEnhancementFlags``,
+/// ``Terminal/applicationCursor`` and ``Terminal/applicationKeypad`` for each key event.
+public struct KittyKeyboardEncoder: Sendable {
+    public let flags: KittyKeyboardFlags
+    public let applicationCursor: Bool
+    public let applicationKeypad: Bool
+    public let backspaceSendsControlH: Bool
 
-    func encode(_ event: KittyKeyEvent) -> [UInt8]? {
+    public init(flags: KittyKeyboardFlags, applicationCursor: Bool, applicationKeypad: Bool,
+                backspaceSendsControlH: Bool = false) {
+        self.flags = flags
+        self.applicationCursor = applicationCursor
+        self.applicationKeypad = applicationKeypad
+        self.backspaceSendsControlH = backspaceSendsControlH
+    }
+
+    /// The bytes to send for `event`, or nil when the protocol reports nothing for it.
+    public func encode(_ event: KittyKeyEvent) -> [UInt8]? {
         let wantsAllKeys = flags.contains(.reportAllKeys)
         let wantsDisambiguate = flags.contains(.disambiguate) || wantsAllKeys
         let wantsEvents = flags.contains(.reportEvents)

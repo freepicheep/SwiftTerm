@@ -603,8 +603,8 @@ open class Terminal {
         buffer === altBuffer
     }
     
-    // Whether the terminal is operating in application keypad mode
-    var applicationKeypad : Bool = false
+    /// Whether the terminal is operating in application keypad mode (DECKPAM)
+    public internal(set) var applicationKeypad : Bool = false
     
     // Whether the terminal is operating in application cursor mode
     public var applicationCursor : Bool = false
@@ -7506,6 +7506,34 @@ open class Terminal {
         
         scrollInvariantRefreshStart = buffer.yDisp
         scrollInvariantRefreshEnd = buffer.yDisp + rows
+    }
+
+    /// Places an inline image (sixel, iTerm2) at the cursor, one slice per row.
+    ///
+    /// Each slice is attached to the buffer line it covers, so it scrolls with the text and
+    /// goes away with that line; the cursor moves down one line per slice and keeps its
+    /// column. Hosts call this from `createImageFromBitmap` or `createImage`, having cut the
+    /// image into cell-height slices whose `col` is the cursor column.
+    public func attachImageRows(_ slices: [TerminalImage])
+    {
+        let buffer = self.buffer
+        var didScroll = false
+        for slice in slices {
+            buffer.attachImage(slice, toLineAt: buffer.y + buffer.yBase)
+            updateRange(buffer.y)
+            // A line feed may also return the carriage (LNM); images keep their column.
+            let savedX = buffer.x
+            let previousYBase = buffer.yBase
+            let previousLinesTop = buffer.linesTop
+            cmdLineFeed()
+            if buffer.yBase != previousYBase || buffer.linesTop != previousLinesTop {
+                didScroll = true
+            }
+            buffer.x = savedX
+        }
+        if didScroll {
+            updateFullScreen()
+        }
     }
     
     /// Copies one active palette entry. Callers must serialize access as for

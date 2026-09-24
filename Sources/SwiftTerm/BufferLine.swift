@@ -166,7 +166,8 @@ public final class BufferLine: CustomDebugStringConvertible {
     }
 
     private var imagesValue: [TerminalImage]? = nil
-    var images: [TerminalImage]? {
+    /// Inline image slices attached to this line (see ``Terminal/attachImageRows(_:)``).
+    public internal(set) var images: [TerminalImage]? {
         get { imagesValue }
         set {
             // The common recycle and snapshot path writes nil to an empty row.

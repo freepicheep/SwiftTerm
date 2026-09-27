@@ -228,11 +228,14 @@ public final class Buffer {
     public var savedCharset: [UInt8:String]? = nil
     
     var hasScrollback : Bool
-    var cols: Int {
+    /// The buffer's own width. While the alternate screen is active, the normal buffer keeps
+    /// the grid it had when the switch happened, so this can differ from `Terminal.cols`.
+    public internal(set) var cols: Int {
         get { _cols }
         set { _cols = newValue }
     }
-    var rows: Int {
+    /// The buffer's own height; see `cols`.
+    public internal(set) var rows: Int {
         get { _rows }
         set { _rows = newValue }
     }
@@ -245,6 +248,17 @@ public final class Buffer {
     /// borrow the list for the duration of one operation.
     var lines : CircularBufferLineList {
         _read { yield _lines }
+    }
+
+    /// Returns a line counting from the beginning of this buffer's scroll back, including
+    /// lines trimmed from it (so `totalLinesTrimmed` is the first valid row), or nil if `row`
+    /// is out of range. Unlike `Terminal.getScrollInvariantLine`, this reads this buffer
+    /// even when it is not the active one.
+    public func getScrollInvariantLine (row: Int) -> BufferLine? {
+        if row < linesTop || row >= lines.count + linesTop {
+            return nil
+        }
+        return lines [row - linesTop]
     }
 
     /// Returns true if any lines in this buffer have images attached

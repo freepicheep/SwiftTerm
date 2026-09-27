@@ -556,7 +556,12 @@ open class Terminal {
 
     // The current buffers
     private let cellArena: CellArena
-    var normalBuffer, altBuffer: Buffer
+    /// The normal screen buffer and its scroll back. It is kept intact while the alternate
+    /// screen is active (`buffer` is then `altBuffer`), so hosts can read what the normal
+    /// screen holds without switching back to it.
+    public internal(set) var normalBuffer: Buffer
+    /// The alternate screen buffer. It has no scroll back and is cleared on each switch back.
+    public internal(set) var altBuffer: Buffer
     /**
      * Returns the active buffer (either the normal buffer or the alternative buffer)
      */

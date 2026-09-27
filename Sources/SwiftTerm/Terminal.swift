@@ -5505,6 +5505,30 @@ open class Terminal {
     }
 
     func cmdDecRqm (_ pars: CsiParameters, decMode: Bool) {
+        guard let mode = pars.first else {
+            sendResponse (cc.CSI, ";0$y")
+            return
+        }
+        let res = modeReportValue(mode, decPrivate: decMode)
+        if decMode {
+            sendResponse (cc.CSI, "?\(mode);\(res)$y")
+        } else {
+            sendResponse (cc.CSI, "\(mode);\(res)$y")
+        }
+    }
+
+    /// The state of `mode` as DECRQM reports it: 0 not recognized, 1 set, 2 reset,
+    /// 3 permanently set, 4 permanently reset. `decPrivate` selects DEC private modes
+    /// (`CSI ? Pa $ p`) rather than ANSI modes (`CSI Pa $ p`).
+    ///
+    /// This lets a host read mode state without feeding a query through `feed`. A query
+    /// fed that way is parsed in whatever state the parser was left in, so if the last
+    /// output stopped partway through an escape sequence, the query is absorbed into that
+    /// sequence, corrupting it and producing no reply. Hosts that serialize a terminal's
+    /// state while output is still arriving (for example, to restore a session later)
+    /// need this, since most mode flags are not otherwise public.
+    public func modeReportValue (_ mode: Int, decPrivate: Bool = true) -> Int {
+        let decMode = decPrivate
         let modeUnknown = 0
         let modeSet = 1
         let modeReset = 2
@@ -5515,10 +5539,6 @@ open class Terminal {
         let modeCouldBeImplementedButReset = 2
         let modeCouldBeImplementedButSet = 1
         
-        guard let mode = pars.first else {
-            sendResponse (cc.CSI, ";0$y")
-            return
-        }
         var res = modeUnknown
         if decMode {
             switch mode {
@@ -5653,11 +5673,7 @@ open class Terminal {
                 break
             }
         }
-        if decMode {
-            sendResponse (cc.CSI, "?\(mode);\(res)$y")
-        } else {
-            sendResponse (cc.CSI, "\(mode);\(res)$y")
-        }
+        return res
     }
     
     //

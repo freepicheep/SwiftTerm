@@ -85,6 +85,18 @@ final class TerminalIOPipeline: Sendable {
     static let bufferCapacity = 8_192
 #endif
 
+    /// After this long without input, the gather thread gives the pages of
+    /// the ring's free slots back to the system.
+    ///
+    /// Every read touches at least a page of its slot, so after a little output
+    /// every slot has resident pages (a full 256 KiB after a burst on Darwin),
+    /// and they stay resident while the shell sits idle. That is nothing for
+    /// one terminal, but a process that keeps many terminals open, a
+    /// multiplexer server say, pays it for each. Releasing happens once per
+    /// idle period, never on the streaming path; the next read takes the
+    /// pages back and faults them in as zeroes.
+    static let idleReleaseMilliseconds: Int32 = 1000
+
     private let sink: TerminalIOPipelineSink
     private let worker: TerminalIOPipelineWorker
 
@@ -134,6 +146,10 @@ final class TerminalIOPipeline: Sendable {
     func waitUntilStopped(timeout: TimeInterval) -> Bool {
         worker.waitUntilStopped(timeout: timeout)
     }
+
+    /// Testing hook: how many times the idle gather thread gave its free
+    /// buffers' pages back.
+    var idleReleaseCount: Int { worker.idleReleaseCount }
 }
 
 /// Converts a timeout into a saturating uptime deadline in nanoseconds.
@@ -181,7 +197,26 @@ private final class TerminalIOPipelineWorker: @unchecked Sendable {
     private var idleWriteFd: Int32 = -1
 
     private let storage: UnsafeMutablePointer<UInt8>
+    private let storageBytes = TerminalIOPipeline.bufferCount * TerminalIOPipeline.bufferCapacity
+    /// True when `storage` is a page-aligned mapping whose pages can be given
+    /// back while idle; false when it came from the system allocator.
+    private let storageIsMapped: Bool
     private let condition = NSCondition()
+
+    /// Slots whose pages were given back and must be taken back before use.
+    /// Only the gather thread reads or writes this.
+    private var releasedSlots = Array(repeating: false, count: TerminalIOPipeline.bufferCount)
+    /// Slots written since they were last given back. Only the gather thread
+    /// reads or writes this.
+    private var touchedSlots = Array(repeating: false, count: TerminalIOPipeline.bufferCount)
+    /// Idle releases so far, for tests. Guarded by `condition`.
+    private var idleReleases = 0
+
+    var idleReleaseCount: Int {
+        condition.lock()
+        defer { condition.unlock() }
+        return idleReleases
+    }
 
     // Buffer contents are never locked: each slot is owned by exactly one stage
     // at a time. This condition protects only ring metadata. With one gather
@@ -216,8 +251,15 @@ private final class TerminalIOPipelineWorker: @unchecked Sendable {
     init(fd: Int32, sink: TerminalIOPipelineSink) {
         self.fd = fd
         self.sink = sink
-        self.storage = UnsafeMutablePointer<UInt8>.allocate(
-            capacity: TerminalIOPipeline.bufferCount * TerminalIOPipeline.bufferCapacity)
+        let bytes = TerminalIOPipeline.bufferCount * TerminalIOPipeline.bufferCapacity
+        if let mapped = mmap(nil, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0),
+           mapped != MAP_FAILED {
+            self.storage = mapped.bindMemory(to: UInt8.self, capacity: bytes)
+            self.storageIsMapped = true
+        } else {
+            self.storage = UnsafeMutablePointer<UInt8>.allocate(capacity: bytes)
+            self.storageIsMapped = false
+        }
         let controlPipeReady = Self.makePipe(readFd: &controlReadFd, writeFd: &controlWriteFd)
         let idlePipeReady = Self.makePipe(readFd: &idleReadFd, writeFd: &idleWriteFd)
         wakePipesReady = controlPipeReady && idlePipeReady
@@ -229,7 +271,11 @@ private final class TerminalIOPipelineWorker: @unchecked Sendable {
         condition.unlock()
         precondition(threadsFinished, "TerminalIOPipeline storage released before worker completion")
         closeDescriptorsIfNeeded()
-        storage.deallocate()
+        if storageIsMapped {
+            munmap(UnsafeMutableRawPointer(storage), storageBytes)
+        } else {
+            storage.deallocate()
+        }
     }
 
     func start() {
@@ -495,6 +541,8 @@ private final class TerminalIOPipelineWorker: @unchecked Sendable {
             condition.unlock()
 
             let buffer = storage.advanced(by: slot * TerminalIOPipeline.bufferCapacity)
+            reclaimSlotIfReleased(slot)
+            touchedSlots[slot] = true
             var total = 0
             var bridgeStart: UInt64?
             var spins = 0
@@ -620,8 +668,17 @@ private final class TerminalIOPipelineWorker: @unchecked Sendable {
                 continue
             }
 
+            // Wait with a timeout first: after a quiet period, give the free
+            // slots' pages back, then wait without one.
+            var releaseWhenIdle = storageIsMapped && touchedSlots.contains(true)
             waitForInput: while true {
-                let pollResult = Self.pollFds(&pollFds, count: 2, timeout: -1)
+                let pollResult = Self.pollFds(&pollFds, count: 2,
+                                              timeout: releaseWhenIdle ? TerminalIOPipeline.idleReleaseMilliseconds : -1)
+                if pollResult == 0 && releaseWhenIdle {
+                    releaseWhenIdle = false
+                    releaseFreeSlots()
+                    continue waitForInput
+                }
                 if pollResult < 0 && errno == EINTR {
                     continue
                 }
@@ -647,6 +704,41 @@ private final class TerminalIOPipelineWorker: @unchecked Sendable {
                 break
             }
         }
+    }
+
+    /// Gives the pages of every slot the parse thread doesn't own back to the
+    /// system. Runs on the gather thread, which owns the free slots.
+    private func releaseFreeSlots() {
+        condition.lock()
+        var owned = Array(repeating: false, count: TerminalIOPipeline.bufferCount)
+        for index in 0..<count {
+            owned[(tail + index) % TerminalIOPipeline.bufferCount] = true
+        }
+        condition.unlock()
+        for slot in 0..<TerminalIOPipeline.bufferCount where !owned[slot] && touchedSlots[slot] {
+            let base = UnsafeMutableRawPointer(storage.advanced(by: slot * TerminalIOPipeline.bufferCapacity))
+#if canImport(Darwin)
+            _ = madvise(base, TerminalIOPipeline.bufferCapacity, MADV_FREE_REUSABLE)
+#else
+            _ = madvise(base, TerminalIOPipeline.bufferCapacity, MADV_DONTNEED)
+#endif
+            touchedSlots[slot] = false
+            releasedSlots[slot] = true
+        }
+        condition.lock()
+        idleReleases += 1
+        condition.unlock()
+    }
+
+    /// Takes back a slot given up by `releaseFreeSlots` before writing to it.
+    @inline(__always)
+    private func reclaimSlotIfReleased(_ slot: Int) {
+        guard releasedSlots[slot] else { return }
+        releasedSlots[slot] = false
+#if canImport(Darwin)
+        let base = UnsafeMutableRawPointer(storage.advanced(by: slot * TerminalIOPipeline.bufferCapacity))
+        _ = madvise(base, TerminalIOPipeline.bufferCapacity, MADV_FREE_REUSE)
+#endif
     }
 
     private func markDone() {

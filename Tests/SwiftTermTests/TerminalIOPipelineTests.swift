@@ -184,6 +184,38 @@ final class TerminalIOPipelineTests {
         #expect(pipeline.waitUntilStopped(timeout: 1))
     }
 
+    /// An idle gather thread gives its free buffers' pages back and takes them
+    /// back for the next read; nothing may be lost or reordered across that.
+    @Test func idleBuffersAreGivenBackAndReused() throws {
+        let first = Self.countingPattern(byteCount: 300 * 1024)
+        let second = first.reversed().map { $0 ^ 0x5a }
+        let pty = try Self.makeRawPty()
+        let capture = PipelineCapture()
+        let pipeline = TerminalIOPipeline(fd: pty.master, delegate: capture)
+        pipeline.start()
+
+        let writer = PtyWriter(fd: pty.slave, payload: first,
+                               chunkSizes: Self.randomChunkSizes(count: 64), closeWhenDone: false)
+        writer.start()
+        #expect(capture.waitForBytes(first.count, timeout: 10))
+        #expect(writer.waitUntilDone(timeout: 1))
+
+        // Quiet for longer than the idle threshold.
+        let limit = Date().addingTimeInterval(Double(TerminalIOPipeline.idleReleaseMilliseconds) / 1000 + 5)
+        while pipeline.idleReleaseCount == 0 && Date() < limit {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        #expect(pipeline.idleReleaseCount == 1)
+
+        let writer2 = PtyWriter(fd: pty.slave, payload: Array(second),
+                                chunkSizes: Self.randomChunkSizes(count: 64))
+        writer2.start()
+        #expect(capture.waitForEOF(timeout: 10))
+        #expect(writer2.waitUntilDone(timeout: 1))
+        #expect(capture.receivedData() == first + second)
+        #expect(pipeline.waitUntilStopped(timeout: 1))
+    }
+
     @Test func integrityAndLastPartialBatch() throws {
         let payload = Self.countingPattern(byteCount: 2 * 65_536 + 317)
         let pty = try Self.makeRawPty()

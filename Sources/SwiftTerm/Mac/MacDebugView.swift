@@ -80,7 +80,7 @@ public class TerminalDebugView: NSView {
         terminalView.withTerminal { terminal in
             let buffer = terminal.buffer
             let physicalLines = buffer.lines.getArray()
-            let rows = (0..<buffer.lines.maxLength).map { row in
+            let rows = (0..<buffer.lines.capacity).map { row in
                 DebugRow(
                     logicalIndex: row,
                     cyclicIndex: buffer.lines.debugGetCyclicIndex(row),

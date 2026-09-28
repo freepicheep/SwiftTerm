@@ -235,10 +235,7 @@ internal final class CircularBufferLineList {
             precondition(newValue <= maxLength)
 
             if newValue > array.count {
-                let start = array.count
-                for _ in start..<newValue {
-                    array.append (nil)
-                }
+                grow(toHold: newValue)
             }
             _count = newValue
         }
@@ -257,10 +254,12 @@ internal final class CircularBufferLineList {
     var maxLength: Int {
         didSet {
             if maxLength != oldValue {
+                // Keep the slots in use; a larger limit is reached by growing
+                // later, as lines arrive.
+                let capacity = min(maxLength, array.count)
                 let empty : BufferLine? = nil
-                var newArray = Array(repeating: empty, count:Int(maxLength))
-                let top = min (maxLength, array.count)
-                for i in 0..<top {
+                var newArray = Array(repeating: empty, count: capacity)
+                for i in 0..<capacity {
                     newArray [i] = array [getCyclicIndex(i)]
                 }
                 startIndex = 0
@@ -268,6 +267,34 @@ internal final class CircularBufferLineList {
                 return
             }
         }
+    }
+
+    /// Slots allocated when the list is created or reset.
+    ///
+    /// The slot array used to be allocated at `maxLength` up front: 8 bytes for
+    /// every line of scrollback a terminal might ever hold, 40 KiB for a
+    /// 5,000-line history before a single line was written. It now starts at
+    /// this size and doubles as lines arrive, up to `maxLength`. The ring only
+    /// wraps (reusing its oldest slot) once it has reached `maxLength`, so the
+    /// order of lines never depends on the current capacity.
+    static let initialCapacity = 64
+
+    /// Slots currently allocated. At most `maxLength`.
+    var capacity: Int { array.count }
+
+    /// Makes room for at least `needed` lines (capped at `maxLength`), keeping
+    /// every slot's contents in logical order from slot zero.
+    @inline(never)
+    private func grow(toHold needed: Int) {
+        let newCapacity = min(maxLength, max(needed, array.count * 2, Self.initialCapacity))
+        guard newCapacity > array.count else { return }
+        let empty : BufferLine? = nil
+        var newArray = Array(repeating: empty, count: newCapacity)
+        for i in 0..<array.count {
+            newArray [i] = array [getCyclicIndex(i)]
+        }
+        startIndex = 0
+        array = newArray
     }
 
     /// The buffer this list belongs to.
@@ -310,7 +337,7 @@ internal final class CircularBufferLineList {
 
     public init (maxLength: Int)
     {
-        array = Array.init(repeating: nil, count: Int(maxLength))
+        array = Array.init(repeating: nil, count: min(maxLength, Self.initialCapacity))
         self.maxLength = maxLength
         self._count = 0
         self.startIndex = 0
@@ -356,6 +383,9 @@ internal final class CircularBufferLineList {
 #else
         if isLive { owner.lineAttached(value) }
 #endif
+        if _count == array.count && array.count < maxLength {
+            grow(toHold: _count + 1)
+        }
         array [getCyclicIndex(count)] = value
         if count == array.count {
             startIndex = startIndex + 1
@@ -417,6 +447,9 @@ internal final class CircularBufferLineList {
                 i += 1
             }
             count = count - deleteCount
+        }
+        if count + items.count > array.count {
+            grow(toHold: count + items.count)
         }
         // add items
         var i = count-1
@@ -482,6 +515,9 @@ internal final class CircularBufferLineList {
             return dumpState ("start+offset <= 0")
         }
         if offset > 0 {
+            if start + count + offset > array.count {
+                grow(toHold: start + count + offset)
+            }
             for i in (0..<count).reversed() {
                 array[getCyclicIndex(start + i + offset)] = array[getCyclicIndex(start + i)]
             }
@@ -612,15 +648,18 @@ internal final class CircularBufferLineList {
         }
         _count = 0
         startIndex = 0
-        // Changing the length is the one allocation; the didSet builds the
-        // new array and copies the old references into it. Clearing the
-        // slots afterwards releases them without a second allocation, and an
-        // unchanged length allocates nothing.
         if maxLength != newMaxLength {
             maxLength = newMaxLength
         }
-        for index in array.indices {
-            array[index] = nil
+        // Give back the slots a long history grew; an unchanged small ring
+        // is cleared in place without allocating.
+        let initial = min(maxLength, Self.initialCapacity)
+        if array.count > initial {
+            array = Array(repeating: nil, count: initial)
+        } else {
+            for index in array.indices {
+                array[index] = nil
+            }
         }
     }
 

@@ -1095,7 +1095,9 @@ open class Terminal {
     
     public init (delegate: TerminalDelegate, options: TerminalOptions = TerminalOptions.default)
     {
-        let cellArena = CellArena()
+        // The terminal's rows get their cells from slabs the arena maps itself,
+        // so freeing history (see compactHistory) gives memory back.
+        let cellArena = CellArena(ownsCellMemory: true)
         self.cellArena = cellArena
         installedColors = Color.terminalAppColors
         defaultAnsiColors = Color.setupDefaultAnsiColors(initialColors: installedColors,

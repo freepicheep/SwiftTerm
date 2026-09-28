@@ -351,9 +351,13 @@ final class CellArena {
     private let isSnapshotCopy: Bool
 
     init(styleCapacity: Int = Int(UInt16.max),
-         graphemeCapacity: Int = CellArena.defaultGraphemeCapacity) {
+         graphemeCapacity: Int = CellArena.defaultGraphemeCapacity,
+         ownsCellMemory: Bool = false) {
         snapshotSourceIdentity = nil
         isSnapshotCopy = false
+#if !SWIFTTERM_EMBEDDED && (canImport(Darwin) || canImport(Glibc))
+        cellMemory = ownsCellMemory ? CellMemory() : nil
+#endif
         attributeCapacity = min(max(styleCapacity, 0), Int(UInt16.max))
         attributes = .allocate(capacity: attributeCapacity + 1)
         attributes.initialize(to: CharData.defaultAttr)
@@ -375,6 +379,9 @@ final class CellArena {
     private init(snapshotOf source: CellArena) {
         snapshotSourceIdentity = source.identity
         isSnapshotCopy = true
+#if !SWIFTTERM_EMBEDDED && (canImport(Darwin) || canImport(Glibc))
+        cellMemory = nil
+#endif
 
         // Keep the pointer stable for the lifetime of this snapshot arena.
         // A terminal arena has a fixed identifier capacity, so later refreshes
@@ -492,6 +499,34 @@ final class CellArena {
         }
         graphemeBlocks.deinitialize(count: graphemeBlockCapacity)
         graphemeBlocks.deallocate()
+    }
+
+#if !SWIFTTERM_EMBEDDED && (canImport(Darwin) || canImport(Glibc))
+    /// Where the cells of this arena's rows live, for a terminal's own arena
+    /// (see ``CellMemory``). Nil for snapshot copies and standalone lines,
+    /// whose cells come from the system allocator.
+    let cellMemory: CellMemory?
+#endif
+
+    /// Cells for a row of `count` cells, from ``cellMemory`` when there is one.
+    @inline(__always)
+    func allocateCells(_ count: Int) -> UnsafeMutableBufferPointer<PackedCell> {
+#if !SWIFTTERM_EMBEDDED && (canImport(Darwin) || canImport(Glibc))
+        if let cellMemory { return cellMemory.allocate(count: count) }
+#endif
+        return .allocate(capacity: count)
+    }
+
+    /// Frees cells from ``allocateCells(_:)``. They must be deinitialized.
+    @inline(__always)
+    func deallocateCells(_ cells: UnsafeMutableBufferPointer<PackedCell>) {
+#if !SWIFTTERM_EMBEDDED && (canImport(Darwin) || canImport(Glibc))
+        if let cellMemory {
+            cellMemory.deallocate(cells)
+            return
+        }
+#endif
+        cells.deallocate()
     }
 
     var attributeCount: Int { attributeCountValue - 1 }
@@ -992,19 +1027,19 @@ final class CellStoragePage {
             preconditionFailure("CellStoragePage cannot encode its fill cell")
         }
         self.arena = selectedArena
-        cells = .allocate(capacity: count)
+        cells = selectedArena.allocateCells(count)
         cells.initialize(repeating: packed)
     }
 
     init(count: Int, repeating packed: PackedCell, arena: CellArena) {
         self.arena = arena
-        cells = .allocate(capacity: count)
+        cells = arena.allocateCells(count)
         cells.initialize(repeating: packed)
     }
 
     init(copying other: CellStoragePage) {
         arena = other.arena
-        cells = .allocate(capacity: other.count)
+        cells = other.arena.allocateCells(other.count)
         if other.count > 0 {
             cells.baseAddress!.initialize(from: other.cells.baseAddress!,
                                           count: other.count)
@@ -1017,7 +1052,7 @@ final class CellStoragePage {
         precondition(arena.preservesEncoding(from: other.arena),
                      "The snapshot arena cannot decode this storage page")
         self.arena = arena
-        cells = .allocate(capacity: other.count)
+        cells = arena.allocateCells(other.count)
         if other.count > 0 {
             cells.baseAddress!.initialize(from: other.cells.baseAddress!,
                                           count: other.count)
@@ -1026,7 +1061,7 @@ final class CellStoragePage {
 
     deinit {
         cells.deinitialize()
-        cells.deallocate()
+        arena.deallocateCells(cells)
     }
 
     @inline(__always)

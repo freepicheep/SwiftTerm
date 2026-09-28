@@ -86,6 +86,29 @@ For a plain 72-character line with one style: 9 bytes of lookup data, a
 24-byte header, one 8-byte template, one start (padded to 8) and 72 content
 bytes: about 121 bytes of chunk, against about 820 for the line.
 
+## Giving memory back
+
+Freeing rows is not the same as giving memory back. The system allocator
+(xzone malloc on current macOS) spreads allocations of one size across its
+slabs, so after compaction the few rows still on screen keep nearly every slab
+partly in use and resident. In a daemon holding five filled sessions, each
+dropped only from 10.1 to 6.8 MiB of footprint, although the heap's live data
+dropped to about 1.4 MiB; `malloc_zone_pressure_relief` released nothing.
+
+So a terminal's cells, 640 of the roughly 830 bytes of an 80-column row, come
+from `CellMemory`: 256 KiB slabs the terminal maps itself, one set per row
+width, filled from the slab that most recently had room, and unmapped as soon
+as they are empty (one empty slab per width is kept, its pages given back).
+Rows freed together then empty whole slabs. With it the same sessions take 4.6
+MiB each after compaction (tmux holds the same history in 5.0 MiB). What is
+left beyond the cold chunks is the per-row objects (`BufferLine`, its
+`CellStoragePage` and render identity, about 190 bytes), which the system
+allocator retains the same way.
+
+`CellMemory` is used on Darwin and Linux, for a terminal's own arena only;
+Embedded and WASI builds, snapshot arenas and standalone lines use the system
+allocator.
+
 ## Costs
 
 Measured on an M1 Pro with `Tools/SwiftTermBenchmarks` (`history_*`), 80x25,
@@ -114,3 +137,7 @@ instructions as before, within 0.4%.
   `isRowWrapped` and key lookups without decompressing.
 - **Recycling line objects.** A burst right after compaction allocates a line
   object per recycled cold row.
+- **Fewer objects per row.** A row is three objects (the line, its cell page
+  and its render identity). Folding the page into the line and creating the
+  identity lazily would cut what the system allocator retains after
+  compaction by about a third.

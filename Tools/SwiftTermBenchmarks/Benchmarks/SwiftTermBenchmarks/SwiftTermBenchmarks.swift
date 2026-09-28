@@ -103,7 +103,107 @@ private func snapshot(_ benchmark: Benchmark, imageSize: (width: Int, height: In
     benchmark.stopMeasurement()
 }
 
+/// Ten thousand lines of styled shell-like output for the history benchmarks:
+/// a colored word, then plain text, 20 to 79 columns wide.
+private let historyOutput: [UInt8] = {
+    let words = ["lorem", "ipsum", "dolor", "sit", "amet", "consectetur", "adipiscing", "elit"]
+    var text = ""
+    for i in 0..<10_000 {
+        var line = "\u{1b}[3\(i % 8)m\(words[i % words.count])\u{1b}[0m "
+        var visible = words[i % words.count].count + 1
+        let width = 20 + (i * 37) % 60
+        var j = i
+        while visible < width {
+            let word = words[j % words.count]
+            line += word + " "
+            visible += word.count + 1
+            j += 3
+        }
+        text += line + "\r\n"
+    }
+    return Array(text.utf8)
+}()
+
+/// A terminal whose 10,000 lines of scrollback hold `historyOutput`. Keep
+/// the returned host alive for as long as the terminal is used.
+private func historyTerminal() -> (host: HeadlessTerminal, terminal: Terminal) {
+    let options = TerminalOptions(cols: SwiftTermBenchmarks.columns, rows: SwiftTermBenchmarks.rows,
+                                  scrollback: 10_000)
+    let host = HeadlessTerminal(queue: SwiftTermBenchmarks.queue, options: options) { _ in }
+    let terminal = host.terminal!
+    terminal.feed(byteArray: historyOutput)
+    return (host, terminal)
+}
+
+/// The cold history benchmarks. Compaction runs when the terminal is idle, so
+/// these measure the idle-time work and what reading or overwriting cold rows
+/// costs, not the parse path (the vtebench cases cover that).
+///
+/// - `history_compaction`: moving 10,000 rows into cold history and back.
+/// - `history_cold_read`: reading every cold row without restoring it, as
+///   search, selection and serialization do.
+/// - `history_scroll_over_cold` and `history_scroll_over_warm`: 10,000 new
+///   lines scrolling through a full scrollback. The cold case compacts first,
+///   so each of its iterations also includes the compacting half of
+///   `history_compaction`; beyond that, the difference is what recycling
+///   every cold row costs during a burst of output right after compaction.
+private func registerHistoryBenchmarks() {
+    Benchmark(
+        "history_compaction",
+        configuration: .init(metrics: [.wallClock], maxDuration: .seconds(10))
+    ) { benchmark in
+        let (host, terminal) = historyTerminal()
+        defer { withExtendedLifetime(host) {} }
+        benchmark.startMeasurement()
+        for _ in benchmark.scaledIterations {
+            terminal.compactHistory(.full)
+            terminal.restoreHistory()
+        }
+        benchmark.stopMeasurement()
+    }
+
+    Benchmark(
+        "history_cold_read",
+        configuration: .init(metrics: [.wallClock], maxDuration: .seconds(10))
+    ) { benchmark in
+        let (host, terminal) = historyTerminal()
+        defer { withExtendedLifetime(host) {} }
+        terminal.compactHistory(.full)
+        precondition(terminal.historyStorage.coldRows > 9_900)
+        let buffer = terminal.buffer
+        let first = buffer.totalLinesTrimmed
+        let rows = terminal.historyStorage.coldRows + terminal.historyStorage.residentRows
+        benchmark.startMeasurement()
+        for _ in benchmark.scaledIterations {
+            for row in first..<(first + rows) {
+                blackHole(buffer.readScrollInvariantLine(row: row))
+            }
+        }
+        benchmark.stopMeasurement()
+    }
+
+    for cold in [true, false] {
+        Benchmark(
+            cold ? "history_scroll_over_cold" : "history_scroll_over_warm",
+            configuration: .init(metrics: [.wallClock], maxDuration: .seconds(10))
+        ) { benchmark in
+            let (host, terminal) = historyTerminal()
+        defer { withExtendedLifetime(host) {} }
+            benchmark.startMeasurement()
+            for _ in benchmark.scaledIterations {
+                if cold {
+                    terminal.compactHistory(.full)
+                }
+                terminal.feed(byteArray: historyOutput)
+            }
+            benchmark.stopMeasurement()
+        }
+    }
+}
+
 let benchmarks: @Sendable () -> Void = {
+    registerHistoryBenchmarks()
+
     for workload in SwiftTermBenchmarks.workloads {
         Benchmark(
             workload.name,

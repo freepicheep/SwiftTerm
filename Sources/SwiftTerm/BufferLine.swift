@@ -231,6 +231,39 @@ public final class BufferLine: CustomDebugStringConvertible {
         tailBlankCell = other.tailBlankCell
     }
 
+    // MARK: Cold history
+
+    /// Calls `body` with this row's cells up to the last one that differs from
+    /// the blank tail, as raw 64-bit values, and that tail cell. The cells past
+    /// the prefix are all equal to the tail, so the two describe the row
+    /// exactly. Used to move the row into cold history.
+    func withStoredCells<R>(_ body: (UnsafeBufferPointer<UInt64>, PackedCell) -> R) -> R {
+        var used = min(usedLength, storage.count)
+        while used > 0 && storage.rawCell(at: used &- 1) == tailBlankCell {
+            used &-= 1
+        }
+        return storage.withRawCells(upTo: used) { body($0, tailBlankCell) }
+    }
+
+    /// Rebuilds a row that was moved into cold history: `width` cells, the
+    /// first `storedCount` written by `fill` (as raw 64-bit values), the rest
+    /// `tail`.
+    init(restoringWidth width: Int, storedCount: Int, tail: PackedCell,
+         isWrapped: Bool, bidiState: BidiPresentationState, renderMode: RenderLineMode,
+         arena: CellArena, fill: (UnsafeMutablePointer<UInt64>) -> Void)
+    {
+        precondition(storedCount <= width)
+        isWrappedValue = isWrapped
+        bidiStateValue = bidiState
+        renderModeValue = renderMode
+        storage = CellStoragePage(count: width, repeating: tail, arena: arena)
+        if storedCount > 0 {
+            storage.withMutableRawCells { fill($0.baseAddress!) }
+        }
+        usedLength = storedCount
+        tailBlankCell = tail
+    }
+
     /// Returns the number of CharData cells in this row
     public var count: Int {
         get {

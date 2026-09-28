@@ -1034,6 +1034,19 @@ final class CellStoragePage {
         cells[index]
     }
 
+    /// Calls `body` with the raw 64-bit values of the first `count` cells.
+    func withRawCells<R>(upTo count: Int,
+                         _ body: (UnsafeBufferPointer<UInt64>) -> R) -> R {
+        UnsafeBufferPointer(rebasing: cells[0..<count]).withMemoryRebound(to: UInt64.self) {
+            body($0)
+        }
+    }
+
+    /// Calls `body` with the cells as raw 64-bit values, for bulk writes.
+    func withMutableRawCells<R>(_ body: (UnsafeMutableBufferPointer<UInt64>) -> R) -> R {
+        cells.withMemoryRebound(to: UInt64.self) { body($0) }
+    }
+
     @inline(__always)
     func view(at index: Int) -> PackedCellView {
         PackedCellView(packed: cells[index], arena: arena)

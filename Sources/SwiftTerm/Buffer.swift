@@ -283,7 +283,7 @@ public final class Buffer {
     func recalculateLinesWithImagesCount() {
         var count = 0
         for i in 0..<lines.count {
-            if lines[i].images != nil {
+            if residentLine(i)?.images != nil {
                 count += 1
             }
         }
@@ -405,7 +405,9 @@ public final class Buffer {
     // origin resolves to nil and clicks are refused rather than routed against
     // a dead prompt.
     private func rowHasGroupOpeningMark(_ row: Int) -> Bool {
-        lines[row].semanticMarks.contains {
+        // Cold rows carry no marks, so the scan never restores them.
+        guard let line = residentLine(row) else { return false }
+        return line.semanticMarks.contains {
             ($0.kind == .initial || $0.kind == .secondary) && $0.group == activeSemanticGroupID
         }
     }
@@ -423,14 +425,15 @@ public final class Buffer {
         var below = anchor
         var above = anchor + 1
         while below >= 0 || above < count {
+            // Only lines in the ring can match: the scan looks for a line object.
             if below >= 0 {
-                if predicate(lines[below]) {
+                if let line = residentLine(below), predicate(line) {
                     return below
                 }
                 below -= 1
             }
             if above < count {
-                if predicate(lines[above]) {
+                if let line = residentLine(above), predicate(line) {
                     return above
                 }
                 above += 1
@@ -570,10 +573,11 @@ public final class Buffer {
         var current = row
         var epoch: UInt64? = nil
         while current > 0 {
-            let line = lines[current]
-            if line.isWrapped {
+            // A cold row has no continuation group; only its wrap flag matters.
+            let line = residentLine(current)
+            if line?.isWrapped ?? isRowWrapped(current) {
                 // soft wrap: same physical write, same group inherently
-            } else if let g = line.semanticHardContinuationGroup {
+            } else if let g = line?.semanticHardContinuationGroup {
                 if let e = epoch, e != g {
                     return nil        // crossed into a different group's epoch
                 }
@@ -604,7 +608,7 @@ public final class Buffer {
     /// origin. An `initial` mark is always an origin; a `secondary` mark counts
     /// only on the tracked active origin row (an `A;k=s` group with no primary).
     private func originMarkGroup(at row: Int, activeOrigin: Int?) -> UInt64? {
-        let line = lines[row]
+        guard let line = residentLine(row) else { return nil }
         if let mark = line.semanticMarks.first(where: { $0.kind == .initial }) {
             return mark.group
         }
@@ -620,7 +624,7 @@ public final class Buffer {
     /// The single membership predicate used by both classification (any group)
     /// and click geometry (restricted to the active group).
     private func joiningMarkGroup(at row: Int) -> UInt64? {
-        lines[row].semanticMarks.first {
+        residentLine(row)?.semanticMarks.first {
             ($0.kind == .secondary || $0.kind == .continuation || $0.kind == .right)
                 && $0.group != 0
         }?.group
@@ -631,7 +635,7 @@ public final class Buffer {
     /// mark (PS2/right). The click geometry uses this to walk the group.
     func rowContinuesActiveGroupHard(_ row: Int) -> Bool {
         guard row >= 0, row < lines.count, activeSemanticGroupID != 0 else { return false }
-        return lines[row].semanticHardContinuationGroup == activeSemanticGroupID
+        return residentLine(row)?.semanticHardContinuationGroup == activeSemanticGroupID
             || joiningMarkGroup(at: row) == activeSemanticGroupID
     }
 
@@ -643,7 +647,7 @@ public final class Buffer {
             // C.1: only the active group's own secondaries count — a stale
             // secondary from a dead group surviving on a cleared screen must
             // not skew the relative report.
-            for mark in lines[row].semanticMarks
+            for mark in residentLine(row)?.semanticMarks ?? []
             where mark.kind == .secondary && mark.group == activeSemanticGroupID {
                 if row < position.row || mark.column <= position.col {
                     relative = Position(col: mark.column, row: row)
@@ -817,6 +821,139 @@ public final class Buffer {
     {
         getBlankLine(packedBlank: PackedCell(), isWrapped: false)
     }
+
+    // MARK: Cold history
+
+    /// Fills an empty slot of the live ring: with the row from cold history
+    /// that belongs there, or with a blank line for a slot never filled.
+    func lineForEmptySlot(at index: Int) -> BufferLine {
+        if !coldHistory.isEmpty,
+           let line = coldHistory.take(_lines.droppedCount &+ index, arena: cellArena) {
+            line.owningBufferRef = selfRef
+            coldRestoreCount &+= 1
+            return line
+        }
+        return makeEmptyLine(index)
+    }
+
+    /// The ring dropped its oldest row while that row was cold, recycling
+    /// the slot for a new bottom row. Releases the row and returns a line
+    /// object for the slot.
+    func lineForDroppedColdRow() -> BufferLine {
+        coldHistory.drop(below: _lines.droppedCount)
+        return makeEmptyLine(0)
+    }
+
+    /// The line at `index`, for reading only: the line itself when it is in
+    /// the ring, otherwise a temporary copy rebuilt from cold history that is
+    /// not kept, so reading all of history does not restore it. Changes made
+    /// to a temporary copy are lost.
+    func readOnlyLine(_ index: Int) -> BufferLine {
+        if let line = _lines.peek(index) { return line }
+        if !coldHistory.isEmpty,
+           let line = coldHistory.peek(_lines.droppedCount &+ index, arena: cellArena) {
+            return line
+        }
+        return _lines[index]
+    }
+
+    /// The line at `index` if it is in the ring, without restoring a cold row
+    /// or filling an empty slot. Cold rows never carry semantic marks,
+    /// continuation groups or images, so scans for those can skip nil.
+    func residentLine(_ index: Int) -> BufferLine? {
+        _lines.peek(index)
+    }
+
+    /// Whether the row at `index` is soft-wrapped, without restoring it.
+    func isRowWrapped(_ index: Int) -> Bool {
+        if let line = _lines.peek(index) { return line.isWrapped }
+        return coldHistory.isWrapped(_lines.droppedCount &+ index) ?? false
+    }
+
+    /// Changes whenever this buffer did something that can give
+    /// ``compactHistory(maxRows:maxInspected:)`` new work: lines scrolled
+    /// into history, rows restored, the viewport moved. Compared for equality
+    /// only; it is not an ordering.
+    var historyActivity: UInt64 {
+        var value = UInt64(truncatingIfNeeded: _lines.droppedCount)
+        for part in [_yBase, _yDisp, _lines.count, coldRestoreCount] {
+            value = (value ^ UInt64(truncatingIfNeeded: part)) &* 0x9e37_79b9_7f4a_7c15
+        }
+        return value
+    }
+
+    /// Rows currently held in cold history.
+    var coldRowCount: Int { coldHistory.rowCount }
+
+    /// Moves every cold row back into the ring. Operations that rearrange
+    /// the whole ring, such as reflow, call this first.
+    func restoreHistory() {
+        guard !coldHistory.isEmpty else { return }
+        coldHistory.drop(below: _lines.droppedCount)
+        for index in 0..<_lines.count where _lines.peek(index) == nil {
+            _ = _lines[index]
+        }
+        coldHistory.removeAll()
+        compactionCursor = nil
+        compactionVerifying = false
+    }
+
+    /// Whether `line` can move to cold history. Rows with images or semantic
+    /// prompt state stay in the ring, since other structures refer to them.
+    private func canMoveToColdHistory(_ line: BufferLine) -> Bool {
+        line.images == nil && line.semanticMarks.isEmpty &&
+            line.semanticHardContinuationGroup == nil && line.count <= Int(UInt16.max)
+    }
+
+    /// One bounded step of moving cold scrollback rows out of the ring.
+    ///
+    /// Scans at most `maxInspected` slots from where the previous step
+    /// stopped and moves at most `maxRows` rows into one new chunk. A row is
+    /// cold when it is in history (above the screen), not in the viewport,
+    /// carries no images or semantic prompt state, and nothing outside the
+    /// ring holds a reference to it. Once a pass reaches the screen, one more
+    /// pass checks for rows restored in the meantime; the result is
+    /// `.complete` when that pass finds nothing to move.
+    func compactHistory(maxRows: Int, maxInspected: Int) -> HistoryCompactionResult {
+        guard hasScrollback else { return .complete }
+        coldHistory.drop(below: _lines.droppedCount)
+        let dropped = _lines.droppedCount
+        let end = min(_yBase, _lines.count)
+        let visible = _yDisp..<(_yDisp &+ _rows)
+        var index = max(0, (compactionCursor ?? dropped) - dropped)
+        var builder = HistoryChunkBuilder()
+        var inspected = 0
+        while index < end && inspected < maxInspected && builder.count < maxRows {
+            defer {
+                index += 1
+                inspected += 1
+            }
+            if visible.contains(index) { continue }
+            // Check without keeping a reference, so the uniqueness test below
+            // sees only the ring's.
+            guard _lines.peek(index).map(canMoveToColdHistory) ?? false,
+                  let line = _lines.takeUniquelyReferenced(index) else { continue }
+            if !builder.add(line, key: dropped &+ index) {
+                _lines[index] = line
+            }
+        }
+        if !builder.isEmpty {
+            coldHistory.add(builder.build())
+            compactionMovedRows = true
+        }
+        if index < end {
+            compactionCursor = dropped &+ index
+            return .pending
+        }
+        compactionCursor = nil
+        if !compactionVerifying || compactionMovedRows {
+            compactionVerifying = true
+            compactionMovedRows = false
+            return .pending
+        }
+        compactionVerifying = false
+        return .complete
+    }
     
     /**
      * Returns the CharData at the specified position, the screen coordinate is what the user
@@ -856,6 +993,9 @@ public final class Buffer {
         // and the live list reports every dropped line with images, so
         // `_linesWithImagesCount` is already back to zero afterwards.
         _lines.reset(maxLength: getCorrectBufferLength(rows))
+        coldHistory.removeAll()
+        compactionCursor = nil
+        compactionVerifying = false
         scrollTop = 0
         scrollBottom = rows - 1
         marginLeft = 0
@@ -913,6 +1053,10 @@ public final class Buffer {
     
     public func resize (newCols : Int, newRows : Int)
     {
+        if newCols != cols {
+            // Resizing and reflowing rewrite every row; cold ones come back first.
+            restoreHistory()
+        }
         let defaultBlank = PackedCell()
         if marginRight > newCols - 1 {
             marginRight = newCols - 1
@@ -1032,7 +1176,7 @@ public final class Buffer {
             // worse, they would be created at the old `cols` (updated below) and
             // trip the abort() when widening.
             for i in 0..<lines.count {
-                let line = lines [i]
+                guard let line = residentLine(i) else { continue }
                 if line.count < newCols {
                     print ("stop here newCols=\(newCols) but the element has: \(line.count)")
                     fatalError("A resized line is shorter than the buffer width")
@@ -1088,7 +1232,7 @@ public final class Buffer {
     func semanticPromptInvariantsHold() -> Bool {
         let activeOrigin = semanticPromptStartRow
         for row in 0..<lines.count {
-            let line = lines[row]
+            let line = readOnlyLine(row)
             var seenKinds: [SemanticPromptKind] = []
             for mark in line.semanticMarks {
                 // Continuation is a derived row kind; storing it is a bug
@@ -1141,7 +1285,7 @@ public final class Buffer {
     
     func translateBufferLineToString (lineIndex: Int, trimRight: Bool, startCol: Int = 0, endCol: Int = -1, skipNullCellsFollowingWide: Bool = false, characterProvider: ((CharData) -> Character)? = nil, textProvider: ((CharData) -> String)? = nil) -> String
     {
-        let line = _lines [lineIndex]
+        let line = readOnlyLine(lineIndex)
         return line.translateToString(trimRight: trimRight, startCol: startCol, endCol: endCol, skipNullCellsFollowingWide: skipNullCellsFollowingWide, characterProvider: characterProvider, textProvider: textProvider)
     }
     
@@ -1941,4 +2085,19 @@ public final class Buffer {
         }
     }    
 #endif
+
+    // Cold history state. Declared last so that it does not move the offsets
+    // of the fields the parse and scroll paths touch.
+
+    /// Scrollback rows moved out of the line ring by ``compactHistory(maxRows:maxInspected:)``.
+    let coldHistory = ColdHistory()
+
+    /// Rows restored from cold history so far; part of ``historyActivity``.
+    private(set) var coldRestoreCount = 0
+
+    /// Where an incremental compaction pass continues, as a ring key
+    /// (`droppedCount + index`), and the state of the pass.
+    private var compactionCursor: Int? = nil
+    private var compactionVerifying = false
+    private var compactionMovedRows = false
 }

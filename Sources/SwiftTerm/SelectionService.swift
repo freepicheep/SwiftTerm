@@ -209,7 +209,7 @@ public class SelectionService: CustomDebugStringConvertible {
         var result: [SelectedContentSnapshot.Row] = []
         result.reserveCapacity (lastRow - firstRow + 1)
         for row in firstRow...lastRow {
-            let line = buffer.lines [row]
+            let line = buffer.readOnlyLine(row)
             guard let columns = selectedColumnsRange (row: row, cols: line.count) else {
                 continue
             }

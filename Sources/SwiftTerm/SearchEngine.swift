@@ -214,8 +214,8 @@ final class SearchEngine {
             return nil
         }
 
-        let firstLine = buffer.lines[row]
-        if firstLine.isWrapped {
+        let firstLineIsWrapped = buffer.isRowWrapped(row)
+        if firstLineIsWrapped {
             if isReverseSearch {
                 searchPosition.startCol += terminal.cols
                 return nil
@@ -326,7 +326,7 @@ final class SearchEngine {
             return 0
         }
 
-        let line = buffer.lines[row]
+        let line = buffer.readOnlyLine(row)
         var stringOffset = 0
         var column = 0
         while column < line.count {
@@ -352,7 +352,7 @@ final class SearchEngine {
         var remainingCols = cols
 
         while remainingCols > 0 && lineIndex < buffer.lines.count {
-            let line = buffer.lines[lineIndex]
+            let line = buffer.readOnlyLine(lineIndex)
             let limit = min(remainingCols, terminal.cols)
             if limit > 0 {
                 var column = 0
@@ -367,8 +367,8 @@ final class SearchEngine {
             if lineIndex >= buffer.lines.count {
                 break
             }
-            let nextLine = buffer.lines[lineIndex]
-            if !nextLine.isWrapped {
+            let nextLineIsWrapped = buffer.isRowWrapped(lineIndex)
+            if !nextLineIsWrapped {
                 break
             }
             remainingCols -= terminal.cols

@@ -9677,7 +9677,8 @@ open class Terminal {
         };
         
         // get the first line
-        var bufferLine = buf.lines [start.row]
+        // Read-only: rows in cold history are read without restoring them.
+        var bufferLine = buf.readOnlyLine(start.row)
         if bufferLine.hasAnyContent() {
             let str: String = translateBufferLineToString (buffer: buf, line: start.row, start: start.col, end: start.row < end.row ? -1 : end.col)
             
@@ -9689,7 +9690,7 @@ open class Terminal {
         var line = start.row + 1
         var isWrapped = false
         while line < end.row {
-            bufferLine = buffer.lines [line]
+            bufferLine = buffer.readOnlyLine(line)
             isWrapped = bufferLine.isWrapped
             
             str = translateBufferLineToString (buffer: buf, line: line, start: 0, end: -1)
@@ -9728,7 +9729,7 @@ open class Terminal {
         
         // get the last row
         if end.row != start.row {
-            bufferLine = buffer.lines [end.row]
+            bufferLine = buffer.readOnlyLine(end.row)
             if bufferLine.hasAnyContent () {
                 addBlanks ()
                 

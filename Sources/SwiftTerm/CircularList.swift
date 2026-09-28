@@ -358,11 +358,7 @@ internal final class CircularBufferLineList {
         _read {
             let idx = getCyclicIndex(index)
             if array[idx] == nil {
-#if SWIFTTERM_EMBEDDED
-                array[idx] = owner!.makeEmptyLine(idx)
-#else
-                array[idx] = owner.makeEmptyLine(idx)
-#endif
+                fillEmptySlot(idx, index: index)
             }
             yield array[idx]!
         }
@@ -374,6 +370,51 @@ internal final class CircularBufferLineList {
             if isLive { owner.lineAttached(newValue) }
 #endif
       }
+    }
+
+    /// Fills an empty slot: either never filled, or holding a row that moved
+    /// into cold history, which the owner restores. Out of line, so the
+    /// subscript inlined into every hot path stays as small as before.
+    @inline(never)
+    private func fillEmptySlot(_ idx: Int, index: Int) {
+#if SWIFTTERM_EMBEDDED
+        array[idx] = isLive ? owner!.lineForEmptySlot(at: index) : owner!.makeEmptyLine(idx)
+#else
+        array[idx] = isLive ? owner.lineForEmptySlot(at: index) : owner.makeEmptyLine(idx)
+#endif
+    }
+
+    /// The oldest row was in cold history when the full ring recycled its
+    /// slot. The row is dropped now, and the slot needs a line object again
+    /// for the new bottom row.
+    @inline(never)
+    private func refillDroppedColdSlot(_ idx: Int) {
+#if SWIFTTERM_EMBEDDED
+        array[idx] = owner!.lineForDroppedColdRow()
+#else
+        array[idx] = owner.lineForDroppedColdRow()
+#endif
+    }
+
+    /// The line in slot `index`, or nil when the slot is empty (for example
+    /// because its row is in cold history). Unlike the subscript, this never
+    /// fills the slot.
+    func peek(_ index: Int) -> BufferLine? {
+        array[getCyclicIndex(index)]
+    }
+
+    /// Empties slot `index` and returns its line, if the ring held the only
+    /// reference to it. A line referenced elsewhere is left in place, since a
+    /// later change through that reference must stay visible in the buffer.
+    func takeUniquelyReferenced(_ index: Int) -> BufferLine? {
+        let idx = getCyclicIndex(index)
+        guard var line = array[idx] else { return nil }
+        array[idx] = nil
+        if isKnownUniquelyReferenced(&line) {
+            return line
+        }
+        array[idx] = line
+        return nil
     }
 
     func push (_ value: BufferLine)
@@ -392,6 +433,7 @@ internal final class CircularBufferLineList {
             if startIndex == array.count {
                 startIndex = 0
             }
+            droppedCount &+= 1
         } else {
             count = count + 1
         }
@@ -412,6 +454,10 @@ internal final class CircularBufferLineList {
         let index = startIndex
         let next = startIndex &+ 1
         startIndex = next == maxLength ? 0 : next
+        droppedCount &+= 1
+        if array[index] == nil {
+            refillDroppedColdSlot(index)
+        }
         // The array owns the line until this function finishes using it.
 #if SWIFTTERM_EMBEDDED
         let line = array[index]!
@@ -479,6 +525,7 @@ internal final class CircularBufferLineList {
             if !array.isEmpty {
                 startIndex %= array.count
             }
+            droppedCount &+= countToTrim
             count = array.count
         } else {
             count = count + items.count
@@ -492,6 +539,7 @@ internal final class CircularBufferLineList {
         if !array.isEmpty {
             startIndex %= array.count
         }
+        droppedCount &+= c
         self.count -= count
     }
 
@@ -530,7 +578,7 @@ internal final class CircularBufferLineList {
                     if !array.isEmpty {
                         startIndex %= array.count
                     }
-                    // trimmed callback invoke
+                    droppedCount &+= 1
                 }
             }
         } else {
@@ -648,6 +696,7 @@ internal final class CircularBufferLineList {
         }
         _count = 0
         startIndex = 0
+        droppedCount = 0
         if maxLength != newMaxLength {
             maxLength = newMaxLength
         }
@@ -668,4 +717,15 @@ internal final class CircularBufferLineList {
             return count == maxLength
         }
     }
+
+    // Declared last so that it does not move the offsets of the hot fields.
+    /// Lines dropped off the start of the ring since it was created or reset:
+    /// the oldest line recycled or overwritten by a full ring, or trimmed.
+    ///
+    /// `droppedCount + index` names a line independently of how many lines
+    /// have been dropped since. Cold history uses it to find the row that
+    /// belongs in an empty slot. Every operation that moves lines toward the
+    /// start does so only by dropping them here; operations that shift lines
+    /// in the middle of the ring work on screen rows, below any history.
+    private(set) var droppedCount = 0
 }

@@ -66,9 +66,9 @@ final class SearchLineCache {
         var idx = lineIndex
 
         while idx >= 0 && idx < buffer.lines.count {
-            let line = buffer.lines[idx]
-            let nextLine = (idx + 1) < buffer.lines.count ? buffer.lines[idx + 1] : nil
-            let lineWrapsToNext = nextLine?.isWrapped ?? false
+            let line = buffer.readOnlyLine(idx)
+            let hasNextLine = (idx + 1) < buffer.lines.count
+            let lineWrapsToNext = hasNextLine && buffer.isRowWrapped(idx + 1)
 
             var string = buffer.translateBufferLineToString(
                 lineIndex: idx,
@@ -79,7 +79,8 @@ final class SearchLineCache {
                 textProvider: { self.terminal.getText(for: $0) }
             ).replacingOccurrences(of: "\u{0}", with: " ")
 
-            if lineWrapsToNext, let nextLine {
+            if lineWrapsToNext {
+                let nextLine = buffer.readOnlyLine(idx + 1)
                 let lastIndex = max(line.count - 1, 0)
                 let lastCellIsNull = line.packedCode(at: lastIndex) == 0 &&
                     line.packedWidth(at: lastIndex) <= 1

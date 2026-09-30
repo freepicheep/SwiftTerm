@@ -52,7 +52,7 @@ public final class BufferLine: CustomDebugStringConvertible {
         }
     }
     private var renderModeValue: RenderLineMode = .single
-    var renderMode: RenderLineMode {
+    public internal(set) var renderMode: RenderLineMode {
         get { renderModeValue }
         set {
             guard newValue != renderModeValue else { return }

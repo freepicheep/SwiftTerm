@@ -255,7 +255,9 @@ public class SelectionService: CustomDebugStringConvertible {
         return index == rows.count
     }
 
-    func selectedColumnsRange (row: Int, cols: Int) -> Range<Int>?
+    /// Selected columns of a buffer row, with an exclusive upper bound.
+    /// Call while holding the terminal lock, as for other selection state.
+    public func selectedColumnsRange (row: Int, cols: Int) -> Range<Int>?
     {
         SelectionService.selectedColumns (row: row, cols: cols, start: start, end: end,
                                           block: isBlock, exclusiveEnd: exclusiveEnd)

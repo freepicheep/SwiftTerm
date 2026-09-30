@@ -2653,6 +2653,7 @@ extension Terminal {
         }
         placements.sort {
             if $0.zIndex != $1.zIndex { return $0.zIndex < $1.zIndex }
+            if $0.imageId != $1.imageId { return $0.imageId < $1.imageId }
             return $0.insertionOrder < $1.insertionOrder
         }
         return KittyGraphicsRenderSnapshot(

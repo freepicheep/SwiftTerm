@@ -222,7 +222,9 @@ public class SelectionService: CustomDebugStringConvertible {
         return result
     }
 
-    func selectedColumnsRange (row: Int, cols: Int) -> Range<Int>?
+    /// Selected columns of a buffer row, with an exclusive upper bound.
+    /// Call while holding the terminal lock, as for other selection state.
+    public func selectedColumnsRange (row: Int, cols: Int) -> Range<Int>?
     {
         let firstRow = min (start.row, end.row)
         let lastRow = max (start.row, end.row)

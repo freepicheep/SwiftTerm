@@ -19,9 +19,12 @@ public struct TerminalKittyPlaceholderPlacement: Sendable, Equatable {
 extension Terminal {
     /// Resolve visible Unicode placeholders and crop aspect-fit virtual images
     /// to their cells. Call while holding terminalLock. Use a Kitty snapshot
-    /// made under that same lock so image and text state agree.
+    /// made under that same lock so image and text state agree. Optional buffer
+    /// coordinates let hosts render scrollback and an extra row for smooth scrolling.
+    /// Destination coordinates are relative to the requested top row.
     public func visibleKittyPlaceholderPlacements(
-        snapshot: KittyGraphicsRenderSnapshot, cellWidth: Int, cellHeight: Int
+        snapshot: KittyGraphicsRenderSnapshot, cellWidth: Int, cellHeight: Int,
+        topRow: Int? = nil, rowCount: Int? = nil
     ) -> [TerminalKittyPlaceholderPlacement] {
         guard cellWidth > 0, cellHeight > 0 else { return [] }
         let records = Dictionary(grouping: snapshot.placements.filter(\.isVirtual), by: \.imageId)
@@ -29,8 +32,10 @@ extension Terminal {
         let cw = Double(cellWidth), ch = Double(cellHeight)
         let display = displayBuffer
         var result: [TerminalKittyPlaceholderPlacement] = []
-        for row in 0..<rows {
-            let index = display.yDisp + row
+        let top = max(0, min(topRow ?? display.yDisp, display.lines.count))
+        let count = min(max(0, rowCount ?? rows), display.lines.count - top)
+        for row in 0..<count {
+            let index = top + row
             guard index >= 0, index < display.lines.count else { continue }
             let line = display.lines[index]
             var previous: KittyPlaceholderCell?

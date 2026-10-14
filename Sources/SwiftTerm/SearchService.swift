@@ -8,21 +8,23 @@
 #if !SWIFTTERM_EMBEDDED
 import Foundation
 
+/// Finds text in a terminal's buffer, scrollback included, independent of any view.
+///
+/// `TerminalView` uses one for its find bar; hosts that draw the terminal themselves can
+/// create their own and highlight what ``findAll(term:options:limit:)`` returns.
+///
 /// Search state is guarded by `terminal.terminalLock`; callers must hold it.
-final class SearchService {
-    private enum Constants {
-        static let defaultHighlightLimit = 1000
-    }
-
+public final class SearchService {
     private let terminal: Terminal
     private let state = SearchState()
     private let lineCache: SearchLineCache
     private let engine: SearchEngine
     private var lastSelection: SearchSelection?
 
-    private(set) var lastResult: SearchResult?
+    /// The match the last ``findNext(term:options:)`` or ``findPrevious(term:options:)`` found.
+    public private(set) var lastResult: SearchResult?
 
-    init (terminal: Terminal) {
+    public init (terminal: Terminal) {
         self.terminal = terminal
         let cache = SearchLineCache(terminal: terminal)
         self.lineCache = cache
@@ -34,25 +36,29 @@ final class SearchService {
      * The cache should be invalidated when either the content of the buffer or the buffer dimensions change
      * because the snapshot has direct mappings to buffer line and locations.
     */
-    func invalidate () {
+    public func invalidate () {
         lineCache.invalidate()
         lastResult = nil
         lastSelection = nil
     }
 
-    func reset () {
+    /// Forgets the search term, the last match and the cached lines.
+    public func reset () {
         lineCache.invalidate()
         state.reset()
         lastResult = nil
         lastSelection = nil
     }
 
-    func updateLastSelection (_ selection: SearchSelection?) {
+    /// Sets where the next ``findNext(term:options:)`` or ``findPrevious(term:options:)``
+    /// continues from, for example the user's selection.
+    public func updateLastSelection (_ selection: SearchSelection?) {
         lastSelection = selection
     }
 
+    /// Finds the next match after the last one (or the selection), wrapping at the end.
     @discardableResult
-    func findNext (term: String, options: SearchOptions = SearchOptions()) -> SearchResult? {
+    public func findNext (term: String, options: SearchOptions = SearchOptions()) -> SearchResult? {
         guard state.isValidSearchTerm(term) else {
             lastResult = nil
             lastSelection = nil
@@ -69,8 +75,9 @@ final class SearchService {
         return result
     }
 
+    /// Finds the match before the last one (or the selection), wrapping at the start.
     @discardableResult
-    func findPrevious (term: String, options: SearchOptions = SearchOptions()) -> SearchResult? {
+    public func findPrevious (term: String, options: SearchOptions = SearchOptions()) -> SearchResult? {
         guard state.isValidSearchTerm(term) else {
             lastResult = nil
             lastSelection = nil
@@ -87,7 +94,10 @@ final class SearchService {
         return result
     }
 
-    func findAll (term: String, options: SearchOptions = SearchOptions(), limit: Int = Constants.defaultHighlightLimit) -> [SearchResult] {
+    /// Every match from the top of the scrollback down, at most `limit` of them.
+    ///
+    /// Lines are cached between calls; call ``invalidate()`` when the buffer changes.
+    public func findAll (term: String, options: SearchOptions = SearchOptions(), limit: Int = 1000) -> [SearchResult] {
         guard state.isValidSearchTerm(term) else {
             return []
         }
@@ -115,7 +125,8 @@ final class SearchService {
         return results
     }
 
-    func selectionRange (for result: SearchResult) -> (start: Position, end: Position) {
+    /// The cells `result` covers, its end exclusive.
+    public func selectionRange (for result: SearchResult) -> (start: Position, end: Position) {
         let start = Position(col: result.col, row: result.row)
         let end = advancePosition(from: start, by: max(result.size, 0))
         return (start, end)

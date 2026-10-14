@@ -8,16 +8,39 @@
 #if !SWIFTTERM_EMBEDDED
 import Foundation
 
-struct SearchResult: Equatable {
-    let term: String
-    let col: Int
-    let row: Int
-    let size: Int
+/// A match found by ``SearchService``.
+///
+/// `row` indexes the display buffer's lines, scrollback included (the same rows
+/// `SelectionService` uses), and `size` is the match's length in cells, so a match
+/// that wraps runs on into the following rows.
+public struct SearchResult: Equatable, Sendable {
+    /// The term that was searched for.
+    public let term: String
+    /// The column the match starts at.
+    public let col: Int
+    /// The buffer row the match starts on.
+    public let row: Int
+    /// The match's length in cells.
+    public let size: Int
+
+    public init (term: String, col: Int, row: Int, size: Int) {
+        self.term = term
+        self.col = col
+        self.row = row
+        self.size = size
+    }
 }
 
-struct SearchSelection {
-    let start: Position
-    let end: Position
+/// A range of cells that the next ``SearchService/findNext(term:options:)`` or
+/// ``SearchService/findPrevious(term:options:)`` continues from, usually the selection.
+public struct SearchSelection: Equatable, Sendable {
+    public let start: Position
+    public let end: Position
+
+    public init (start: Position, end: Position) {
+        self.start = start
+        self.end = end
+    }
 }
 
 final class SearchEngine {

@@ -104,6 +104,12 @@ final class TerminalMetalLayerView: TerminalMetalLayerViewBase {
         // We repaint the whole surface every frame, so AppKit does not need to
         // preserve or redraw layer contents on resize.
         layerContentsRedrawPolicy = .onSetNeedsDisplay
+        // The next frame is drawn a tick after a resize; until then Core Animation
+        // shows the last one, which the default placement stretches to the new
+        // bounds. Pinned to the top left it stays at its own size, as the grid
+        // does. (AppKit sets the layer's contentsGravity from this, overwriting
+        // one set on the layer itself.)
+        layerContentsPlacement = .topLeft
 #endif
         let metal = metalLayer
         metal.pixelFormat = .bgra8Unorm

@@ -2556,7 +2556,10 @@ extension TerminalView {
         }
 #endif
         onMain { [weak self] in
-            guard let self else { return }
+            // A later change queued its own echo: applying this one first would
+            // show its stale color for a frame (the default black, set while the
+            // view is built, before the host's own color).
+            guard let self, self.withTerminal({ $0.backgroundColor }) == color else { return }
             self.setNativeBackgroundColorFromTerminal(nativeColor)
             self.colorsChangedOnMain()
         }
@@ -2565,7 +2568,8 @@ extension TerminalView {
     public nonisolated func setForegroundColor(source: Terminal, color: Color) {
         let nativeColor = TTColor.make(color: color)
         onMain { [weak self] in
-            guard let self else { return }
+            // Superseded by a later change; see `setBackgroundColor`.
+            guard let self, self.withTerminal({ $0.foregroundColor }) == color else { return }
             self.setNativeForegroundColorFromTerminal(nativeColor)
             self.colorsChangedOnMain()
         }

@@ -805,6 +805,9 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
         // The renderer must not resize the layer from its render thread.
         mtkView.autoResizeDrawable = true
         mtkView.framebufferOnly = true
+        // Until the first frame at a new size, keep the last one at its own size
+        // rather than stretched (see `TerminalMetalLayerView.commonInit`).
+        mtkView.layerContentsPlacement = .topLeft
         mtkView.colorPixelFormat = .bgra8Unorm
         // Tag the metal layer with sRGB so the compositor color-manages our
         // pixels the same way it color-manages the layer-backed NSView

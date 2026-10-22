@@ -124,6 +124,13 @@ struct FrameFontSet: Sendable {
     var italic: TTFont { italicReference.value }
     var boldItalic: TTFont { boldItalicReference.value }
 
+    /// True when `font` is one of the frame's fonts; false for a font
+    /// CoreText substituted from its fallback cascade.
+    func contains (_ font: CTFont) -> Bool {
+        CFEqual(font, normal) || CFEqual(font, bold)
+            || CFEqual(font, italic) || CFEqual(font, boldItalic)
+    }
+
     func underlinePosition () -> CGFloat {
 #if os(macOS)
         normal.underlinePosition
@@ -209,6 +216,8 @@ struct FrameAppearance: Sendable, Equatable {
     let selectedTextForegroundColor: FrameColor
     let caretColor: FrameColor
     let caretTextColor: FrameColor
+    /// The host's link color, or `nil` when links keep their own colors.
+    let linkColor: FrameColor?
 }
 
 /// Caches main-actor font copies and dynamic-color resolution for frame input.
@@ -221,6 +230,7 @@ final class FrameCaptureCache {
     private var sourceFonts: [TTFont] = []
     private var cachedFonts: FrameFontSet?
     private var sourceColors: [TTColor] = []
+    private var sourceLinkColor: TTColor?
     private var appearanceSignature = 0
     private var cachedAppearance: FrameAppearance?
 
@@ -256,6 +266,7 @@ final class FrameCaptureCache {
             view.effectiveCaretColor,
             view.effectiveCaretTextColor
         ]
+        let linkColor = view.linkColor
 #if os(macOS)
         let signature = view.effectiveAppearance.name.rawValue.hashValue
 #else
@@ -264,7 +275,8 @@ final class FrameCaptureCache {
         if let cachedAppearance,
            appearanceSignature == signature,
            sourceColors.count == current.count,
-           zip(sourceColors, current).allSatisfy({ $0.0.isEqual($0.1) }) {
+           zip(sourceColors, current).allSatisfy({ $0.0.isEqual($0.1) }),
+           sourceLinkColor?.isEqual(linkColor) ?? (linkColor == nil) {
             return cachedAppearance
         }
 
@@ -274,8 +286,10 @@ final class FrameCaptureCache {
             selectedTextBackgroundColor: FrameColor(current[2], view: view),
             selectedTextForegroundColor: FrameColor(current[3], view: view),
             caretColor: FrameColor(current[4], view: view),
-            caretTextColor: FrameColor(current[5], view: view))
+            caretTextColor: FrameColor(current[5], view: view),
+            linkColor: linkColor.map { FrameColor($0, view: view) })
         sourceColors = current
+        sourceLinkColor = linkColor
         appearanceSignature = signature
         cachedAppearance = result
 #if DEBUG
@@ -296,9 +310,6 @@ struct ViewLineSegment {
     /// it belongs to, so glyphs can be positioned by cell (combining marks
     /// share their base's cell instead of shifting the column grid).
     let utf16ToCellOrdinal: [Int]
-    /// True when every cell contributed exactly one UTF-16 unit, so the map
-    /// is the identity and glyph index arithmetic can position runs directly.
-    let utf16IsCellIdentity: Bool
 
     var columnSpan: Int {
         return max(0, characterCount * columnWidth)
@@ -310,6 +321,16 @@ struct ViewLineSegment {
             return utf16ToCellOrdinal[index]
         }
         return max(0, utf16ToCellOrdinal.last ?? 0)
+    }
+
+    /// Terminal-cell ordinals covered by a UTF-16 source range. Unlike glyph
+    /// counts, this includes every cell a ligature consumed.
+    func cellOrdinals(in range: CFRange) -> Range<Int> {
+        guard range.length > 0 else { return 0..<0 }
+        let first = cellOrdinal(forUTF16: range.location)
+        let last = cellOrdinal(forUTF16: range.location + range.length - 1)
+        // cellOrdinal clamps out-of-range indices; keep the Range valid.
+        return first..<(max(first, last) + 1)
     }
 }
 
@@ -380,6 +401,9 @@ struct PreparedRun {
     let glyphPolicy: TerminalGlyphPlacementPolicy?
     /// True when the run carries underline or strikethrough attributes.
     let hasDecorations: Bool
+    /// Terminal cells the run's source text came from; spans its background
+    /// and decorations.
+    let sourceCells: Range<Int>
     let attributes: NSDictionary
 }
 
@@ -548,6 +572,7 @@ struct FrameViewState: Sendable {
     var selectedTextForegroundColor: FrameColor { appearance.selectedTextForegroundColor }
     var caretColor: FrameColor { appearance.caretColor }
     var caretTextColor: FrameColor { appearance.caretTextColor }
+    var linkColor: FrameColor? { appearance.linkColor }
 
     @MainActor
     init (view: TerminalView) {
@@ -618,6 +643,7 @@ struct SnapshotNativeColors {
     let selectedTextForegroundColor: TTColor
     let caretColor: TTColor
     let caretTextColor: TTColor
+    let linkColor: TTColor?
     let ansiColors: [TTColor]
 }
 
@@ -637,6 +663,9 @@ struct SnapshotRenderContext {
     let selectedTextForegroundColor: TTColor
     let caretColor: TTColor
     let caretTextColor: TTColor
+    /// Replaces the foreground and underline color of highlighted link cells;
+    /// `nil` keeps the cell's own colors.
+    let linkColor: TTColor?
     let ansiColors: [TTColor]
     let selection: SnapshotSelectionResolver
     let textBlinkVisible: Bool
@@ -675,6 +704,7 @@ struct SnapshotRenderContext {
                 selectedTextForegroundColor: appearance.selectedTextForegroundColor.nativeColor,
                 caretColor: appearance.caretColor.nativeColor,
                 caretTextColor: appearance.caretTextColor.nativeColor,
+                linkColor: appearance.linkColor?.nativeColor,
                 ansiColors: ansiColors.map(TTColor.make(color:))),
             cols: cols)
     }
@@ -696,6 +726,7 @@ struct SnapshotRenderContext {
         selectedTextForegroundColor = nativeColors.selectedTextForegroundColor
         caretColor = nativeColors.caretColor
         caretTextColor = nativeColors.caretTextColor
+        linkColor = nativeColors.linkColor
         ansiColors = nativeColors.ansiColors
         selection = SnapshotSelectionResolver(style: style, cols: cols)
         textBlinkVisible = style.textBlinkVisible
@@ -721,6 +752,7 @@ struct SnapshotRenderContext {
         identityHasher.combine(selectedTextForegroundColor.hash)
         identityHasher.combine(caretColor.hash)
         identityHasher.combine(caretTextColor.hash)
+        identityHasher.combine(linkColor?.hash)
         for color in self.ansiColors {
             identityHasher.combine(color.hash)
         }
@@ -873,6 +905,19 @@ struct GlyphSlotFit {
         return GlyphSlotFit(dx: dxPixels / renderingScale,
                             dy: dyPixels / renderingScale,
                             scale: scale)
+    }
+
+    /// Shrinks a glyph that CoreText substituted from a fallback font when its
+    /// advance is wider than the single cell it occupies. U+FB03 `ﬃ` from
+    /// Lucida Grande is about 1.6 cells wide under Menlo and would otherwise
+    /// paint over the next cell. The scale is anchored at the pen origin, so
+    /// the glyph keeps its baseline and cell edge. Glyphs that fit are left
+    /// untouched.
+    static func fitFallbackToCell (metrics: GlyphMetrics, cellWidth: CGFloat,
+                                   renderingScale: CGFloat) -> GlyphSlotFit {
+        let slotWidth = cellWidth * renderingScale
+        guard slotWidth > 0, metrics.horizontalAdvance > slotWidth else { return .identity }
+        return GlyphSlotFit(scale: slotWidth / metrics.horizontalAdvance)
     }
 
     /// Internal tuning knob for the one-column icon-height limit; 1.0 leaves
@@ -1706,9 +1751,10 @@ extension TerminalView {
     /// Returns nil when no terminal session is attached. The returned values
     /// remain valid after later feeds, resizes, scrolls, and history trimming.
     public nonisolated func terminalContentSnapshot(
-        region: TerminalContentRegion
+        region: TerminalContentRegion,
+        buffer: Terminal.BufferKind = .active
     ) -> TerminalContentSnapshot? {
-        renderOwner.contentSnapshot(region: region)
+        renderOwner.contentSnapshot(region: region, buffer: buffer)
     }
 
     /// Copies terminal buffer contents without exposing the mutable terminal.
@@ -2012,9 +2058,59 @@ extension TerminalView {
         #endif
         // Snap to pixel grid to avoid sub-pixel seams between adjacent cells
         let scale = backingScaleFactor()
+        // Remembered so the grid can be re-snapped when the view moves to a
+        // screen with a different pixel density; see
+        // `remeasureCellDimensionIfBackingScaleChanged`.
+        cellDimensionBackingScale = scale
         let snappedWidth = (cellWidth * scale).rounded() / scale
         let snappedHeight = ceil(cellHeight * scale) / scale
         return CellDimension(width: max(1, snappedWidth), height: max(min(snappedHeight, 8192), 1))
+    }
+
+    /// Re-snaps the cell grid when the view's pixel density no longer matches
+    /// the one `computeFontDimensions` measured against.
+    ///
+    /// The cell width and height are snapped to the pixel grid of the screen
+    /// the view was on when the font was set. Without this, moving the window
+    /// to a screen with another backing scale (an external monitor to a
+    /// Retina laptop display, or back) kept drawing a grid snapped for the
+    /// old screen: cell edges fell between pixels, glyphs bled into their
+    /// neighbours and the column count no longer matched the width.
+    ///
+    /// Only runs while the view has a window: a detached view would measure
+    /// against `NSScreen.main`, so it keeps its grid until it is attached.
+    ///
+    /// Unlike `resetFont`, this does not go through `resize(cols:rows:)`,
+    /// whose `softReset()` would clear modes set by the running program.
+    /// `processSizeChange` resizes the terminal only when the rows or columns
+    /// change, and otherwise just updates the pixel geometry. Returns whether
+    /// the grid was re-measured.
+    @discardableResult
+    func remeasureCellDimensionIfBackingScaleChanged () -> Bool
+    {
+        guard window != nil, cellDimension != nil, backingScaleFactor() != cellDimensionBackingScale else {
+            return false
+        }
+        cellDimension = computeFontDimensions()
+        refreshCachedViewState()
+        processSizeChange(newSize: frame.size)
+        // Core Graphics draws from the frame snapshot. If the grid still has
+        // the same row and column counts, a size change leaves no dirty rows;
+        // request a full frame after the snapshot has the new cell geometry.
+        withTerminal { $0.updateFullScreen() }
+        // A live resize may have queued counts measured with the old cell
+        // size (or a frame may already be applying them), and the next frame
+        // would restore them over the ones just set. Queue the corrected
+        // counts in their place; if they match, the frame only updates the
+        // pixel geometry.
+        queueSizeChange(newSize: frame.size)
+        updateCaretView()
+        #if os(macOS)
+        needsDisplay = true
+        #else
+        setNeedsDisplay(frame)
+        #endif
+        return true
     }
 
     /// ``CellGeometry/baselineOffset(normalFont:cellHeight:)`` for this view's
@@ -2038,6 +2134,25 @@ extension TerminalView {
                                       columnWidth: columnWidth,
                                       cellDimension: currentCellDimension,
                                       normalFont: fontSet.normal)
+    }
+
+    /// ``GlyphSlotFit/fitFallbackToCell(metrics:cellWidth:renderingScale:)``
+    /// in point space, for the CoreGraphics draw path and the caret.
+    func fallbackGlyphFit (font: CTFont, glyph: CGGlyph) -> GlyphSlotFit
+    {
+        let currentCellDimension: CellDimension? = cellDimension
+        guard let currentCellDimension else { return .identity }
+        return GlyphSlotFit.fitFallbackToCell(metrics: GlyphMetrics.measure(font: font, glyph: glyph),
+                                              cellWidth: currentCellDimension.width,
+                                              renderingScale: 1)
+    }
+
+    /// True when `font` is one of the view's fonts; false for a font
+    /// CoreText substituted from its fallback cascade.
+    func isPrimaryFont (_ font: CTFont) -> Bool
+    {
+        CFEqual(font, fontSet.normal) || CFEqual(font, fontSet.bold)
+            || CFEqual(font, fontSet.italic) || CFEqual(font, fontSet.boldItalic)
     }
 
     /// Policy-aware variant for host glyph-fallback runs: applies the run's
@@ -2426,6 +2541,20 @@ extension TerminalView {
 
     public nonisolated func setBackgroundColor(source: Terminal, color: Color) {
         let nativeColor = TTColor.make(color: color)
+#if !os(macOS)
+        // Native setters already run on the main thread. Apply their callback
+        // before settingBg is reset, so an RGB-only echo cannot replace .clear.
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                self.setNativeBackgroundColorFromTerminal(nativeColor)
+            }
+            // The callback can hold the terminal lock. Refresh colors later.
+            onMain { [weak self] in
+                self?.colorsChangedOnMain()
+            }
+            return
+        }
+#endif
         onMain { [weak self] in
             guard let self else { return }
             self.setNativeBackgroundColorFromTerminal(nativeColor)
@@ -2623,8 +2752,7 @@ extension TerminalView {
         private var characterCount: Int = 0
         private var utf16ToCellOrdinal: [Int] = []
         private var cellCount: Int = 0
-        private var utf16IsCellIdentity = true
-        
+
         init(column: Int, columnWidth: Int) {
             self.column = column
             self.columnWidth = columnWidth
@@ -2655,9 +2783,6 @@ extension TerminalView {
             characterCount += 1
             for length in cellUTF16Lengths {
                 let units = max(1, length)
-                if units != 1 {
-                    utf16IsCellIdentity = false
-                }
                 for _ in 0..<units {
                     utf16ToCellOrdinal.append(cellCount)
                 }
@@ -2669,7 +2794,7 @@ extension TerminalView {
             guard !isEmpty else {
                 return nil
             }
-            return ViewLineSegment(column: column, columnWidth: columnWidth, characterCount: characterCount, attributedString: attributedString, utf16ToCellOrdinal: utf16ToCellOrdinal, utf16IsCellIdentity: utf16IsCellIdentity)
+            return ViewLineSegment(column: column, columnWidth: columnWidth, characterCount: characterCount, attributedString: attributedString, utf16ToCellOrdinal: utf16ToCellOrdinal)
         }
     }
     
@@ -2858,7 +2983,8 @@ extension TerminalView {
     }
     
 
-    func drawRunAttributes(_ attributes: [NSAttributedString.Key : Any], glyphPositions positions: [CGPoint], in currentContext: CGContext) {
+    /// Draws underline and strikethrough: one `cellWidth` stroke per position.
+    func drawRunAttributes(_ attributes: [NSAttributedString.Key : Any], glyphPositions positions: [CGPoint], cellWidth: CGFloat, in currentContext: CGContext) {
         currentContext.saveGState()
 
         let scale = backingScaleFactor()
@@ -2933,7 +3059,7 @@ extension TerminalView {
 
             for p in positions {
                 let start = p.applying(.init(translationX: 0, y: underlinePosition))
-                let end = p.applying(.init(translationX: ceil(cellDimension.width), y: underlinePosition))
+                let end = p.applying(.init(translationX: cellWidth, y: underlinePosition))
                 switch underlineStyle {
                 case .none:
                     break
@@ -2941,7 +3067,7 @@ extension TerminalView {
                     strokePatternedLine(from: start, to: end, thickness: underlineThickness, style: .single)
                     let offset = underlineThickness + 1
                     let start2 = p.applying(.init(translationX: 0, y: underlinePosition - offset))
-                    let end2 = p.applying(.init(translationX: ceil(cellDimension.width), y: underlinePosition - offset))
+                    let end2 = p.applying(.init(translationX: cellWidth, y: underlinePosition - offset))
                     strokePatternedLine(from: start2, to: end2, thickness: underlineThickness, style: .single)
                 case .curly:
                     strokeWavyLine(from: start, to: end, thickness: underlineThickness)
@@ -2965,7 +3091,7 @@ extension TerminalView {
             for p in positions {
                 let path = TTBezierPath()
                 path.move(to: p.applying(.init(translationX: 0, y: strikePosition)))
-                path.addLine(to: p.applying(.init(translationX: ceil(cellDimension.width), y: strikePosition)))
+                path.addLine(to: p.applying(.init(translationX: cellWidth, y: strikePosition)))
                 path.lineWidth = strikeThickness
 
                 if strikeStyle.contains(.patternDash) {
@@ -2978,7 +3104,7 @@ extension TerminalView {
                     let path2 = TTBezierPath()
                     let offset = strikeThickness + 1
                     path2.move(to: p.applying(.init(translationX: 0, y: strikePosition - offset)))
-                    path2.addLine(to: p.applying(.init(translationX: ceil(cellDimension.width), y: strikePosition - offset)))
+                    path2.addLine(to: p.applying(.init(translationX: cellWidth, y: strikePosition - offset)))
                     path2.lineWidth = strikeThickness
                     if strikeStyle.contains(.patternDash) {
                         let pattern: [CGFloat] = [2.0]
@@ -3371,6 +3497,7 @@ extension TerminalView {
                                 forKey: runAttributeKeys.underlineStyle) != nil
                                 || attrs.object(
                                     forKey: runAttributeKeys.strikethroughStyle) != nil,
+                            sourceCells: segment.cellOrdinals(in: CTRunGetStringRange(run)),
                             attributes: attrs)
                     }
                     return (segment, ctLine, runs)
@@ -3390,43 +3517,17 @@ extension TerminalView {
             context.setLineWidth(0)
 
             for prepared in preparedSegments {
-                var processedGlyphs = 0
                 for preparedRun in prepared.runs {
-                    let run = preparedRun.run
-                    let runGlyphsCount = CTRunGetGlyphCount(run)
-                    if runGlyphsCount == 0 {
-                        continue
-                    }
-                    let startColumn: Int
-                    let endColumn: Int
-                    if prepared.segment.utf16IsCellIdentity {
-                        // One UTF-16 unit per cell: glyph index arithmetic
-                        // yields the column span directly.
-                        startColumn = prepared.segment.column + (processedGlyphs * prepared.segment.columnWidth)
-                        endColumn = startColumn + (runGlyphsCount * prepared.segment.columnWidth)
-                    } else {
-                        // Span the columns of the cells this run's characters came
-                        // from: combining marks add glyphs but not columns.
-                        var runIndices = [CFIndex](repeating: 0, count: runGlyphsCount)
-                        CTRunGetStringIndices(run, CFRange(), &runIndices)
-                        var minOrdinal = Int.max
-                        var maxOrdinal = Int.min
-                        for index in runIndices {
-                            let ordinal = prepared.segment.cellOrdinal(forUTF16: index)
-                            minOrdinal = min(minOrdinal, ordinal)
-                            maxOrdinal = max(maxOrdinal, ordinal)
-                        }
-                        startColumn = prepared.segment.column + (minOrdinal * prepared.segment.columnWidth)
-                        endColumn = prepared.segment.column + ((maxOrdinal + 1) * prepared.segment.columnWidth)
-                    }
-                    processedGlyphs += runGlyphsCount
-
                     // Runs carrying the default background are not filled: the
                     // view's layer background already paints that color, and
                     // filling it again would double-composite when the
                     // background is translucent (backgroundOpacity < 1)
                     if preparedRun.hasExplicitBackground,
                        let backgroundColor = preparedRun.backgroundColor {
+                        let startColumn = prepared.segment.column
+                            + preparedRun.sourceCells.lowerBound * prepared.segment.columnWidth
+                        let endColumn = prepared.segment.column
+                            + preparedRun.sourceCells.upperBound * prepared.segment.columnWidth
                         let columnSpan = max(0, endColumn - startColumn)
                         if columnSpan > 0 {
                             var rect = CGRect(
@@ -3486,7 +3587,6 @@ extension TerminalView {
 
             // Glyph drawing loop — reuses cached CTLines
             for prepared in preparedSegments {
-                var processedGlyphs = 0
                 for preparedRun in prepared.runs {
                     let run = preparedRun.run
                     let runGlyphsCount = CTRunGetGlyphCount(run)
@@ -3503,61 +3603,65 @@ extension TerminalView {
                     var coreTextPositions = [CGPoint](repeating: .zero, count: runGlyphsCount)
                     CTRunGetPositions(run, CFRange(), &coreTextPositions)
 
-                    var positions = [CGPoint](repeating: .zero, count: runGlyphsCount)
-                    if prepared.segment.utf16IsCellIdentity {
-                        // One UTF-16 unit per cell: glyph index arithmetic
-                        // yields each glyph's column directly.
-                        let startColumn = prepared.segment.column + (processedGlyphs * prepared.segment.columnWidth)
-                        for i in 0..<runGlyphsCount {
-                            let glyphColumn = startColumn + (i * prepared.segment.columnWidth)
-                            positions[i] = CGPoint(
-                                x: lineOrigin.x + CGFloat(glyphColumn) * cellDimension.width,
-                                y: lineOrigin.y + yOffset + coreTextPositions[i].y)
-                        }
-                    } else {
-                        var runIndices = [CFIndex](repeating: 0, count: runGlyphsCount)
-                        CTRunGetStringIndices(run, CFRange(), &runIndices)
-
-                        // Position each glyph at its source cell's column; glyphs
-                        // sharing a cell (base + combining marks) keep their
-                        // CoreText offsets relative to the cluster's first glyph,
-                        // so marks overlay the base instead of shifting columns.
-                        // Same-cell glyphs are adjacent in glyph order, so a pair
-                        // of locals replaces a per-run anchor dictionary.
-                        var anchorOrdinal = -1
-                        var anchorX: CGFloat = 0
-                        for i in 0..<runGlyphsCount {
-                            let ctPosition = coreTextPositions[i]
-                            let ordinal = prepared.segment.cellOrdinal(forUTF16: runIndices[i])
-                            let intraCluster: CGFloat
-                            if ordinal == anchorOrdinal {
-                                intraCluster = ctPosition.x - anchorX
-                            } else {
-                                anchorOrdinal = ordinal
-                                anchorX = ctPosition.x
-                                intraCluster = 0
-                            }
-                            let glyphColumn = prepared.segment.column + (ordinal * prepared.segment.columnWidth)
-                            positions[i] = CGPoint(
-                                x: lineOrigin.x + CGFloat(glyphColumn) * cellDimension.width + intraCluster,
-                                y: lineOrigin.y + yOffset + ctPosition.y)
-                        }
+                    // Glyphs are mapped to cells through their source UTF-16
+                    // index, not their glyph index: a ligature covers several
+                    // cells with one glyph, and combining marks put several
+                    // glyphs in one cell. CoreText exposes the indices without
+                    // a copy for plain runs; shaped runs need the copy.
+                    let indicesPtr = CTRunGetStringIndicesPtr(run)
+                    var copiedIndices: [CFIndex] = []
+                    if indicesPtr == nil {
+                        copiedIndices = [CFIndex](repeating: 0, count: runGlyphsCount)
+                        CTRunGetStringIndices(run, CFRange(), &copiedIndices)
                     }
-                    processedGlyphs += runGlyphsCount
+                    func cellOrdinal(ofGlyph i: Int) -> Int {
+                        prepared.segment.cellOrdinal(forUTF16: indicesPtr?[i] ?? copiedIndices[i])
+                    }
 
+                    var positions = [CGPoint](repeating: .zero, count: runGlyphsCount)
+                    // Position each glyph at its source cell's column; glyphs
+                    // sharing a cell (base + combining marks) keep their
+                    // CoreText offsets relative to the cluster's first glyph,
+                    // so marks overlay the base instead of shifting columns.
+                    // Same-cell glyphs are adjacent in glyph order, so a pair
+                    // of locals replaces a per-run anchor dictionary.
+                    var anchorOrdinal = -1
+                    var anchorX: CGFloat = 0
+                    for i in 0..<runGlyphsCount {
+                        let ctPosition = coreTextPositions[i]
+                        let ordinal = cellOrdinal(ofGlyph: i)
+                        let intraCluster: CGFloat
+                        if ordinal == anchorOrdinal {
+                            intraCluster = ctPosition.x - anchorX
+                        } else {
+                            anchorOrdinal = ordinal
+                            anchorX = ctPosition.x
+                            intraCluster = 0
+                        }
+                        let glyphColumn = prepared.segment.column + (ordinal * prepared.segment.columnWidth)
+                        positions[i] = CGPoint(
+                            x: lineOrigin.x + CGFloat(glyphColumn) * cellDimension.width + intraCluster,
+                            y: lineOrigin.y + yOffset + ctPosition.y)
+                    }
                     context.setFillColor(
                         coreGraphicsRenderCache.cgColor(
                             for: preparedRun.foregroundColor ?? renderContext.effectiveForegroundColor))
 
                     // Center full-width (CJK) and substituted glyphs within their
                     // multi-cell slot instead of pinning them to the cell's left
-                    // edge. `positions` stays grid-aligned for the decorations
-                    // below; only `glyphPositions` is shifted/scaled.
+                    // edge. `positions` stays grid-aligned; only
+                    // `glyphPositions` is shifted/scaled.
                     let ctRunFont = runFont as CTFont
                     var glyphPositions = positions
                     var scaledFits: [GlyphSlotFit]? = nil
                     let glyphPolicy = preparedRun.glyphPolicy
-                    if glyphPolicy != nil || prepared.segment.columnWidth >= 2 {
+                    // Single-cell glyphs are only fitted when CoreText took
+                    // them from a fallback font, so primary-font text keeps
+                    // the fast path.
+                    let fitsFallbackGlyphs = glyphPolicy == nil
+                        && prepared.segment.columnWidth == 1
+                        && !isPrimaryFont(ctRunFont)
+                    if glyphPolicy != nil || prepared.segment.columnWidth >= 2 || fitsFallbackGlyphs {
                         var computed = [GlyphSlotFit](repeating: .identity, count: runGlyphsCount)
                         var anyScaled = false
                         for i in 0..<runGlyphsCount {
@@ -3566,6 +3670,15 @@ extension TerminalView {
                                 fit = glyphSlotFit(font: ctRunFont, glyph: runGlyphs[i],
                                                    columnWidth: prepared.segment.columnWidth,
                                                    policy: glyphPolicy)
+                            } else if fitsFallbackGlyphs {
+                                // Only a glyph that is alone in exactly one
+                                // cell: combining marks stay on their base,
+                                // and a conjunct keeps its multi-cell span.
+                                let ordinal = cellOrdinal(ofGlyph: i)
+                                let isAlone = (i == 0 || cellOrdinal(ofGlyph: i - 1) != ordinal)
+                                    && (i + 1 < runGlyphsCount ? cellOrdinal(ofGlyph: i + 1)
+                                                               : preparedRun.sourceCells.upperBound) == ordinal + 1
+                                fit = isAlone ? fallbackGlyphFit(font: ctRunFont, glyph: runGlyphs[i]) : .identity
                             } else {
                                 fit = glyphSlotFit(font: ctRunFont, glyph: runGlyphs[i], columnWidth: prepared.segment.columnWidth)
                             }
@@ -3604,12 +3717,21 @@ extension TerminalView {
                         CTFontDrawGlyphs(runFont, runGlyphs, &glyphPositions, glyphPositions.count, context)
                     }
 
-                    // Draw other attributes (decorations stay grid-aligned).
+                    // Draw other attributes, once per source cell (a ligature
+                    // covers several cells, a wide cell several columns).
                     // The dictionary is only bridged for the rare decorated
                     // runs; undecorated runs skip the call entirely.
                     if preparedRun.hasDecorations {
                         let runAttributes = preparedRun.attributes as? [NSAttributedString.Key: Any] ?? [:]
-                        drawRunAttributes(runAttributes, glyphPositions: positions, in: context)
+                        let baselineY = lineOrigin.y + yOffset + coreTextPositions[0].y
+                        let decorationPositions = preparedRun.sourceCells.map { ordinal in
+                            CGPoint(x: lineOrigin.x + CGFloat(prepared.segment.column + ordinal * prepared.segment.columnWidth) * cellDimension.width,
+                                    y: baselineY)
+                        }
+                        drawRunAttributes(runAttributes,
+                                          glyphPositions: decorationPositions,
+                                          cellWidth: ceil(CGFloat(prepared.segment.columnWidth) * cellDimension.width),
+                                          in: context)
                     }
                 }
             }
@@ -4242,7 +4364,10 @@ extension TerminalView {
     
     ///
     /// This takes a string returned by events (NSEvent or UIKey) as the 'charactersIngoringModifiers'
-    /// and returns the control-version of that, and only applies to a handful of characters
+    /// and returns the control-version of that, and only applies to a handful of characters.
+    ///
+    /// As in kitty and Ghostty, Control-/ also sends Control-_, the digits 2 to 8 send NUL, ESC,
+    /// FS, GS, RS, US and DEL, and Control-? sends DEL.
     ///
     func applyControlToEventCharacters (_ ch: String) -> [UInt8]
     {
@@ -4255,18 +4380,20 @@ extension TerminalView {
                 value = (ch.asciiValue! - 0x40 /* - 'A' + 1 */)
             case "a"..."z":
                 value = (ch.asciiValue! - 0x60 /* - 'a' + 1 */)
-            case "\\":
+            case "\\", "4":
                 value = 0x1c
-            case "_":
+            case "_", "/", "7":
                 value = 0x1f
-            case "]":
+            case "]", "5":
                 value = 0x1d
-            case "[":
+            case "[", "3":
                 value = 0x1b
             case "^", "6":
                 value = 0x1e
-            case " ":
+            case " ", "@", "2":
                 value = 0
+            case "?", "8":
+                value = 0x7f
             default:
                 return []
             }

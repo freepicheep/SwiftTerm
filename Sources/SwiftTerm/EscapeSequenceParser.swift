@@ -885,6 +885,42 @@ final class EscapeSequenceParser {
         terminal.printStateReset()
     }
 
+    /// The length of the CSI sequence at `start` (ESC included) when it is one
+    /// the parse loop may take in a single pass, else 0: ESC [, an optional
+    /// private prefix (< = > ?), digits with ; or : separators (no : first,
+    /// fewer separators than the parameter limit), intermediates (0x20-0x2f),
+    /// and a final byte (0x40-0x7e), all within `data`.
+    @inline(__always)
+    static func simpleCsiLength(_ data: Span<UInt8>, at start: Int) -> Int {
+        var j = start + 1
+        guard j < data.count, data[j] == 0x5b else { return 0 }
+        j += 1
+        guard j < data.count else { return 0 }
+        if data[j] >= 0x3c && data[j] <= 0x3f {
+            j += 1
+        } else if data[j] == 0x3a {
+            return 0
+        }
+        var separators = 0
+        while j < data.count {
+            let byte = data[j]
+            if byte >= 0x30 && byte <= 0x3b {
+                if byte >= 0x3a {
+                    separators += 1
+                    if separators >= maximumParameterCount { return 0 }
+                }
+                j += 1
+            } else {
+                break
+            }
+        }
+        while j < data.count && data[j] >= 0x20 && data[j] <= 0x2f {
+            j += 1
+        }
+        guard j < data.count, data[j] >= 0x40 && data[j] <= 0x7e else { return 0 }
+        return j - start + 1
+    }
+
     /// True when the tail of the accumulated OSC payload is an incomplete
     /// UTF-8 scalar, so the next byte is a continuation byte rather than a
     /// C1 string terminator.
@@ -1162,9 +1198,71 @@ final class EscapeSequenceParser {
         // process input string
         var i = 0
         let end = data.count
-        var input = data
+        // A read from the host can end in the middle of a UTF-8 scalar in an
+        // OSC payload, so this chunk starts with its continuation bytes. The
+        // table would take 0x80-0x9f for C1 controls, abort the sequence and
+        // print the rest of its payload on screen. Within a chunk the `oscPut`
+        // run already keeps them as payload, and 0x9c is routed there by the
+        // table, so the rest are kept here. This runs once per chunk rather
+        // than in the loop: a per-byte check slows ordinary ESC and CSI input.
+        if currentState == ParserState.oscString.rawValue {
+            while i < end, data[i] >= 0x80, data[i] < 0xa0, data[i] != 0x9c,
+                  oscLimitExceeded || EscapeSequenceParser.oscExpectsUTF8Continuation(osc) {
+                appendOscBytes(i..<(i + 1), data: data, to: &osc, &oscLimitExceeded, terminal)
+                i += 1
+            }
+        }
+        var input = data.extracting(droppingFirst: i)
         while !input.isEmpty {
             code = input[0]
+
+            // A whole CSI sequence in ground state — most SGR, cursor and erase
+            // commands — gets the actions the table would give it byte by byte,
+            // in one pass: one clear for the ESC and the [, then collect,
+            // parameter and dispatch. Anything the table treats otherwise
+            // (controls inside, a prefix after parameters, too many parameters,
+            // the end of this chunk) takes the table path from the ESC.
+            if code == 0x1b && currentState == ParserState.ground.rawValue {
+                let length = EscapeSequenceParser.simpleCsiLength(data, at: i)
+                if length > 0 {
+                    if ~print != 0 {
+                        terminal.handlePrintBorrowed(data.extracting(print..<i))
+                        print = -1
+                    }
+                    endStringSequence(
+                        osc: &osc, oscLimitExceeded: &oscLimitExceeded,
+                        apc: &apc, apcLimitExceeded: &apcLimitExceeded,
+                        pars: &pars, parsColonMask: &parsColonMask,
+                        collect: &collect, parameterLimitExceeded: &parameterLimitExceeded,
+                        dcs: &dcs, terminal)
+                    oscIgnoredPrefixBytes = false
+                    let final = i + length - 1
+                    var j = i + 2
+                    while j < final {
+                        let byte = data[j]
+                        if byte >= 0x30 && byte <= 0x39 {
+                            pars.accumulateDigit(byte)
+                        } else if byte == 0x3b || byte == 0x3a {
+                            if byte == 0x3a {
+                                parsColonMask |= UInt64(1) << UInt64(pars.count - 1)
+                            }
+                            pars.append(0)
+                        } else {
+                            collect.append(byte)
+                        }
+                        j += 1
+                    }
+                    code = data[final]
+                    if code == 0x6d { _parsColonMask = parsColonMask }
+                    pars.withView { view in
+                        dispatchCsi(code: code, pars: view, collect: collect, terminal)
+                    }
+                    currentState = ParserState.ground.rawValue
+                    input = input.extracting(droppingFirst: length)
+                    i += length
+                    continue
+                }
+            }
 
             // 1f..80 are printable ascii characters
             // c2..f3 are valid utf8 beginning of sequence elements, and most importantly,

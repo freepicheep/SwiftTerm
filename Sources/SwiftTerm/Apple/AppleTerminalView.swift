@@ -541,6 +541,7 @@ struct FrameViewState: Sendable {
     let translucentCellBackgrounds: Bool
     let bidiHostPolicy: BidiHostPolicy
     let glyphFallbackProvider: (any TerminalGlyphFallbackProvider)?
+    let selectionCornerRadius: CGFloat
 
     var effectiveForegroundColor: FrameColor { appearance.effectiveForegroundColor }
     var effectiveBackgroundColor: FrameColor { appearance.effectiveBackgroundColor }
@@ -590,6 +591,7 @@ struct FrameViewState: Sendable {
 #endif
         bidiHostPolicy = view.bidiHostPolicy
         glyphFallbackProvider = view.glyphFallbackProvider
+        selectionCornerRadius = max(0, view.selectionCornerRadius)
     }
 }
 
@@ -682,6 +684,9 @@ struct SnapshotRenderContext {
     let selectionFillColor: TTColor
     let bidiHostPolicy: BidiHostPolicy
     let glyphFallbackProvider: (any TerminalGlyphFallbackProvider)?
+    /// Above zero, the selection is drawn as its own rounded shape rather than
+    /// as cell backgrounds (`TerminalView.selectionCornerRadius`), in points.
+    let selectionCornerRadius: CGFloat
     let cols: Int
 
     /// Identifies the values used to build attributed-string dictionaries.
@@ -756,6 +761,7 @@ struct SnapshotRenderContext {
         }
         bidiHostPolicy = viewState.bidiHostPolicy
         glyphFallbackProvider = viewState.glyphFallbackProvider
+        selectionCornerRadius = viewState.selectionCornerRadius
         self.cols = cols
 
         var identityHasher = Hasher()
@@ -778,6 +784,8 @@ struct SnapshotRenderContext {
         identityHasher.combine(useBrightColors)
         identityHasher.combine(collapseBrightColorsToBase)
         identityHasher.combine(minimumContrastRatio)
+        // Rows paint the selection as cell backgrounds only while it's square.
+        identityHasher.combine(selectionCornerRadius > 0)
         identityHasher.combine(translucentCellBackgroundAlpha)
         identity = UInt64(bitPattern: Int64(identityHasher.finalize()))
     }
@@ -5128,7 +5136,35 @@ extension TerminalView {
             }
         }
     }
-    
+
+    /// The selection's shape on screen, in this view's coordinates, its corners
+    /// rounded as ``selectionCornerRadius`` rounds them: one closed subpath for
+    /// each part that hangs together. For drawing over the selection, such as a
+    /// glow round it as it's copied. `nil` with nothing selected on screen.
+    public func selectionOutline () -> CGPath? {
+        let runs = withTerminal { terminal -> [SelectionShape.Run] in
+            guard selection.active else { return [] }
+            let buffer = terminal.displayBuffer
+            let top = buffer.yDisp
+            return (top..<min(buffer.lines.count, top + terminal.rows)).compactMap { row in
+                selection.selectedColumnsRange(row: row, cols: terminal.cols)
+                    .map { SelectionShape.Run(row: row - top, columns: $0) }
+            }
+        }
+        guard !runs.isEmpty else { return nil }
+        let shape = SelectionShape(runs: runs,
+                                   cell: CGSize(width: cellDimension.width, height: cellDimension.height),
+                                   radius: selectionCornerRadius)
+        let outline = shape.outline()
+#if os(iOS) || os(visionOS)
+        // The rows on screen start where the scroll view is scrolled to.
+        var down = CGAffineTransform(translationX: 0, y: contentOffset.y)
+        return outline.copy(using: &down)
+#else
+        return outline
+#endif
+    }
+
     
     /// Returns the contents of the selection, if active, or nil otherwise
     public func getSelection () -> String?

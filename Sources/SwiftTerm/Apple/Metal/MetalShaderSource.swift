@@ -126,6 +126,61 @@ vertex ColorOut terminal_cell_color_vertex(uint vid [[vertex_id]],
 fragment float4 terminal_color_fragment(ColorOut in [[stage_in]]) {
     return in.color;
 }
+
+// A cursor on its way between cells (TerminalView.cursorMotion): four corners
+// that each ease toward the cell on their own, so the quad can draw out along
+// its path. Its edges are smoothed by a pixel.
+struct CursorQuad {
+    float2 c0;
+    float2 c1;
+    float2 c2;
+    float2 c3;
+    float4 color;
+};
+
+struct CursorQuadOut {
+    float4 position [[position]];
+    float2 pixel;
+};
+
+vertex CursorQuadOut terminal_cursor_vertex(uint vid [[vertex_id]],
+                                            constant CursorQuad &quad [[buffer(0)]],
+                                            constant float2 &viewport [[buffer(1)]]) {
+    float2 lo = min(min(quad.c0, quad.c1), min(quad.c2, quad.c3)) - 1.0;
+    float2 hi = max(max(quad.c0, quad.c1), max(quad.c2, quad.c3)) + 1.0;
+    float2 pixel = mix(lo, hi, kQuadCorners[vid]);
+    CursorQuadOut out;
+    out.position = float4((pixel.x / viewport.x) * 2.0 - 1.0,
+                          (pixel.y / viewport.y) * 2.0 - 1.0, 0.0, 1.0);
+    out.pixel = pixel;
+    return out;
+}
+
+fragment float4 terminal_cursor_fragment(CursorQuadOut in [[stage_in]],
+                                         constant CursorQuad &quad [[buffer(0)]]) {
+    float2 c[4] = { quad.c0, quad.c1, quad.c2, quad.c3 };
+    float area = 0.0;
+    for (int i = 0; i < 4; i++) {
+        float2 a = c[i];
+        float2 b = c[(i + 1) % 4];
+        area += a.x * b.y - b.x * a.y;
+    }
+    float turn = area >= 0.0 ? 1.0 : -1.0;
+    // How far inside every edge the pixel is; negative outside one.
+    float inside = 1e6;
+    for (int i = 0; i < 4; i++) {
+        float2 a = c[i];
+        float2 e = c[(i + 1) % 4] - a;
+        float size = sqrt(dot(e, e));
+        if (size < 1e-3) {
+            continue;
+        }
+        float2 w = in.pixel - a;
+        inside = min(inside, turn * (e.x * w.y - e.y * w.x) / size);
+    }
+    float coverage = clamp(inside + 0.5, 0.0, 1.0);
+    return float4(quad.color.rgb, quad.color.a * coverage);
+}
 """#
 #endif
 #endif

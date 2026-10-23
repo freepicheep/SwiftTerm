@@ -565,6 +565,7 @@ struct FrameViewState: Sendable {
     let minimumContrastRatio: CGFloat
     let bidiHostPolicy: BidiHostPolicy
     let glyphFallbackProvider: (any TerminalGlyphFallbackProvider)?
+    let cursorMotion: CursorMotion?
 
     var effectiveForegroundColor: FrameColor { appearance.effectiveForegroundColor }
     var effectiveBackgroundColor: FrameColor { appearance.effectiveBackgroundColor }
@@ -607,6 +608,7 @@ struct FrameViewState: Sendable {
         minimumContrastRatio = view.minimumContrastRatio
         bidiHostPolicy = view.bidiHostPolicy
         glyphFallbackProvider = view.glyphFallbackProvider
+        cursorMotion = view.cursorMotion
     }
 }
 
@@ -677,6 +679,8 @@ struct SnapshotRenderContext {
     let minimumContrastRatio: CGFloat
     let bidiHostPolicy: BidiHostPolicy
     let glyphFallbackProvider: (any TerminalGlyphFallbackProvider)?
+    /// How the cursor moves between cells (`TerminalView.cursorMotion`).
+    let cursorMotion: CursorMotion?
     let cols: Int
 
     /// Identifies the values used to build attributed-string dictionaries.
@@ -738,6 +742,7 @@ struct SnapshotRenderContext {
         minimumContrastRatio = viewState.minimumContrastRatio
         bidiHostPolicy = viewState.bidiHostPolicy
         glyphFallbackProvider = viewState.glyphFallbackProvider
+        cursorMotion = viewState.cursorMotion
         self.cols = cols
 
         var identityHasher = Hasher()
@@ -1451,6 +1456,9 @@ extension TerminalView {
         let notifyUI: @MainActor @Sendable () -> Void = { [weak self] in
             guard let self else { return }
             self.ensureCaretIsVisible()
+#if canImport(MetalKit)
+            owner.noteMetalCursorInput()
+#endif
             if self.cursorBlinkResetsOnInput {
                 self.caretView?.resetBlinkAfterInput()
 #if canImport(MetalKit)

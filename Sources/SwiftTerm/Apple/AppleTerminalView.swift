@@ -572,6 +572,8 @@ struct FrameViewState: Sendable {
     let bidiHostPolicy: BidiHostPolicy
     let glyphFallbackProvider: (any TerminalGlyphFallbackProvider)?
     let selectionCornerRadius: CGFloat
+    /// Where a smooth scroll stands between rows (Metal on the Mac only).
+    let smoothScroll: SmoothScrollState?
 
     var effectiveForegroundColor: FrameColor { appearance.effectiveForegroundColor }
     var effectiveBackgroundColor: FrameColor { appearance.effectiveBackgroundColor }
@@ -615,7 +617,20 @@ struct FrameViewState: Sendable {
         bidiHostPolicy = view.bidiHostPolicy
         glyphFallbackProvider = view.glyphFallbackProvider
         selectionCornerRadius = max(0, view.selectionCornerRadius)
+#if os(macOS)
+        smoothScroll = view.smoothScrollState
+#else
+        smoothScroll = nil
+#endif
     }
+}
+
+/// Where a smooth scroll stands between rows: the `yDisp` it was drawn for, and how
+/// far below their places the rows are drawn, in points, the row above showing at
+/// the top. A frame whose `yDisp` differs draws the rows in their places.
+struct SmoothScrollState: Sendable, Equatable {
+    let yDisp: Int
+    let offset: CGFloat
 }
 
 struct FrameChangedRange: Sendable, Equatable {

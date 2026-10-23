@@ -4471,6 +4471,80 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
         didSet { scrollSensitivity = max(0.05, scrollSensitivity) }
     }
 
+    /// Scrolls the scrollback by the pixel, as a text view does, rather than a row
+    /// at a time: a trackpad moves it under your fingers, and a wheel's notches
+    /// glide. Only with the Metal renderer; the wheel's other routes (mouse
+    /// reports, the alternate screen) still go by rows.
+    public var smoothScrolling: Bool = false {
+        didSet {
+            if !smoothScrolling { stopSmoothScroll(); smoothScrollState = nil; frameDriver.markDirty() }
+        }
+    }
+
+    /// Where a smooth scroll stands between rows, for the next frame.
+    var smoothScrollState: SmoothScrollState?
+    /// Where an eased wheel scroll is going, in rows from the top of the scrollback.
+    private var smoothScrollTarget: CGFloat?
+    private var smoothScrollTimer: Timer?
+
+    /// The scroll position in rows, fractional while between rows.
+    private var smoothScrollPosition: CGFloat {
+        let top = withTerminal { $0.displayBuffer.yDisp }
+        guard let state = smoothScrollState, state.yDisp == top,
+              let cellHeight = cellDimension?.height, cellHeight > 0 else { return CGFloat(top) }
+        return CGFloat(top) - state.offset / cellHeight
+    }
+
+    /// Shows the scrollback from `position` rows down its top: the whole row at
+    /// or below it at the top of the screen, drawn that part of a row lower so
+    /// the row above shows above it.
+    private func setSmoothScrollPosition(_ position: CGFloat) {
+        guard let cellHeight = cellDimension?.height, cellHeight > 0 else { return }
+        let bottom = withTerminal { CGFloat(max(0, $0.displayBuffer.lines.count - $0.displayBuffer.rows)) }
+        let clamped = min(max(position, 0), bottom)
+        let row = Int(clamped.rounded(.up))
+        // Within a hair of a row, it's that row.
+        let offset = (CGFloat(row) - clamped) * cellHeight
+        scrollTo(row: row)
+        smoothScrollState = offset < 0.25 ? nil : SmoothScrollState(yDisp: row, offset: offset)
+        frameDriver.markDirty()
+    }
+
+    private func stopSmoothScroll() {
+        smoothScrollTimer?.invalidate()
+        smoothScrollTimer = nil
+        smoothScrollTarget = nil
+    }
+
+    /// A trackpad's travel moves the scrollback by as much; a wheel's notch sets
+    /// where it's going, and it eases there over a few frames.
+    private func smoothScroll(_ event: NSEvent, cellHeight: CGFloat) {
+        let delta = event.scrollingDeltaY * scrollSensitivity
+        if event.hasPreciseScrollingDeltas {
+            stopSmoothScroll()
+            setSmoothScrollPosition(smoothScrollPosition - delta / cellHeight)
+            return
+        }
+        // A notch moves at least a row, as the wheel always has.
+        let rows = abs(delta) < 1 ? (delta > 0 ? 1 : -1) : delta.rounded()
+        let bottom = withTerminal { CGFloat(max(0, $0.displayBuffer.lines.count - $0.displayBuffer.rows)) }
+        smoothScrollTarget = min(max((smoothScrollTarget ?? smoothScrollPosition) - rows, 0), bottom)
+        guard smoothScrollTimer == nil else { return }
+        smoothScrollTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 120, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, let target = self.smoothScrollTarget else { self?.stopSmoothScroll(); return }
+                let now = self.smoothScrollPosition
+                // A third of the way each frame: quick to start, gentle to land.
+                if abs(target - now) < 0.02 {
+                    self.setSmoothScrollPosition(target)
+                    self.stopSmoothScroll()
+                } else {
+                    self.setSmoothScrollPosition(now + (target - now) * 0.3)
+                }
+            }
+        }
+    }
+
     private static let logsMouseInput =
         ProcessInfo.processInfo.environment["SWIFTTERM_MOUSE_LOG"] == "1"
 
@@ -4506,6 +4580,13 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
         // held over the alternate buffer, which has no local scrollback.
         if scrollRoute == .none {
             scrollAccumulator.reset()
+            return
+        }
+
+        if smoothScrolling, useMetalRenderer, scrollRoute == .localScrollback {
+            scrollAccumulator.reset()
+            smoothScroll(event, cellHeight: cellHeight)
+            showOverlayScroller()
             return
         }
 

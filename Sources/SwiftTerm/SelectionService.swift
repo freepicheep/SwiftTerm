@@ -234,7 +234,13 @@ public class SelectionService: CustomDebugStringConvertible {
 
         let lowerColumn: Int
         let upperColumn: Int
-        if start.row == end.row, row == start.row {
+        if rectangular {
+            // The same columns on every row, as wide as a one-row selection
+            // between the two ends would be.
+            lowerColumn = min (start.col, end.col)
+            let right = max (start.col, end.col)
+            upperColumn = right + (!exclusiveEnd && right == cols - 1 ? 1 : 0)
+        } else if start.row == end.row, row == start.row {
             if start.col < end.col {
                 lowerColumn = start.col
                 upperColumn = end.col + (!exclusiveEnd && end.col == cols - 1 ? 1 : 0)
@@ -362,7 +368,24 @@ public class SelectionService: CustomDebugStringConvertible {
     public var isMultiLine: Bool {
         return start.row != end.row
     }
-    
+
+    /**
+     * Selects a rectangular block of cells rather than a run of text: the same
+     * columns, between the start's and the end's, on every row from one to the
+     * other, as Option-dragging does in Terminal and iTerm2. Copied, each row
+     * becomes a line of its own.
+     *
+     * Starting a selection afresh (`startSelection`, a word, a row, select all,
+     * none) turns it off; set it after `startSelection` for a block drag.
+     */
+    public var rectangular: Bool = false {
+        didSet {
+            if rectangular != oldValue && active {
+                terminal.tdel?.selectionChanged (source: terminal)
+            }
+        }
+    }
+
     /**
      * Starts the selection from the specific screen-relative location
      */
@@ -371,6 +394,7 @@ public class SelectionService: CustomDebugStringConvertible {
         setSoftStart(row: row, col: col)
         selectingRows = false
         selectionMode = .character
+        rectangular = false
         wordSelectionAnchor = nil
         rowSelectionAnchor = nil
         setActiveAndNotify()
@@ -403,6 +427,7 @@ public class SelectionService: CustomDebugStringConvertible {
         end = start
         selectingRows = false
         selectionMode = .character
+        rectangular = false
         wordSelectionAnchor = nil
         rowSelectionAnchor = nil
         setActiveAndNotify()
@@ -605,6 +630,7 @@ public class SelectionService: CustomDebugStringConvertible {
     public func selectAll ()
     {
         selectionMode = .character
+        rectangular = false
         selectingRows = false
         wordSelectionAnchor = nil
         rowSelectionAnchor = nil
@@ -635,6 +661,7 @@ public class SelectionService: CustomDebugStringConvertible {
         end = Position(col: exclusiveEnd ? terminal.cols : terminal.cols - 1, row: row)
         selectingRows = true
         selectionMode = .row
+        rectangular = false
         wordSelectionAnchor = nil
         rowSelectionAnchor = row
         setActiveAndNotify()
@@ -853,6 +880,7 @@ public class SelectionService: CustomDebugStringConvertible {
             end = position
         }
         selectionMode = .word
+        rectangular = false
         wordSelectionAnchor = (start, end)
         rowSelectionAnchor = nil
         selectingRows = false
@@ -902,6 +930,7 @@ public class SelectionService: CustomDebugStringConvertible {
         if active {
             active = false
             selectionMode = .character
+            rectangular = false
             wordSelectionAnchor = nil
             rowSelectionAnchor = nil
             selectingRows = false
@@ -909,6 +938,9 @@ public class SelectionService: CustomDebugStringConvertible {
     }
     
     public func getSelectedText () -> String {
+        if rectangular {
+            return getRectangularText ()
+        }
         let (min, max) = if Position.compare(start, end) == .before {
             (start, end)
         } else {
@@ -918,8 +950,34 @@ public class SelectionService: CustomDebugStringConvertible {
         return r
     }
     
+    /// A block's text: each row's selected columns as a line of its own,
+    /// without the spaces that pad it out to the block's right edge.
+    private func getRectangularText () -> String {
+        let buffer = terminal.displayBuffer
+        let firstRow = max (0, min (start.row, end.row))
+        let lastRow = min (buffer.lines.count - 1, max (start.row, end.row))
+        guard firstRow <= lastRow else {
+            return ""
+        }
+        var lines: [String] = []
+        for row in firstRow...lastRow {
+            guard let columns = selectedColumnsRange (row: row, cols: buffer.cols) else {
+                lines.append ("")
+                continue
+            }
+            var text = terminal.getText (start: Position (col: columns.lowerBound, row: row),
+                                         end: Position (col: columns.upperBound, row: row),
+                                         buffer: buffer)
+            while let last = text.last, last == " " || last == "\n" || last == "\0" {
+                text.removeLast ()
+            }
+            lines.append (text)
+        }
+        return lines.joined (separator: "\n")
+    }
+
     public var debugDescription: String {
-        return "[Selection (active=\(active), start=\(start) end=\(end) hasSR=\(hasSelectionRange) pivot=\(pivot?.debugDescription ?? "nil")]"
+        return "[Selection (active=\(active), start=\(start) end=\(end) hasSR=\(hasSelectionRange) pivot=\(pivot?.debugDescription ?? "nil")\(rectangular ? " rectangular" : "")]"
     }
 }
 
@@ -937,7 +995,7 @@ extension SelectionService {
         return (first, Position(col: min(terminal.cols, first.col + width), row: first.row))
     }
 
-    func updatePointerSelection(_ position: Position, begin: Bool, mode: UInt32) {
+    func updatePointerSelection(_ position: Position, begin: Bool, mode: UInt32, rectangular: Bool = false) {
         let cell = pointerCell(position)
         if begin && mode != 3 {
             switch mode {
@@ -954,12 +1012,26 @@ extension SelectionService {
                 startSelection(row: position.row - terminal.displayBuffer.yDisp, col: cell.start.col)
                 end = cell.end
                 pivot = cell.start
+                self.rectangular = rectangular
             }
             setActiveAndNotify()
             return
         }
         guard active else {
-            if begin { updatePointerSelection(position, begin: true, mode: 0) }
+            if begin { updatePointerSelection(position, begin: true, mode: 0, rectangular: rectangular) }
+            return
+        }
+        if selectionMode == .character {
+            self.rectangular = rectangular
+        }
+        if self.rectangular {
+            // Both the anchor's cell and the pointer's, and every column
+            // between, on every row from one to the other.
+            let anchor = pointerCell(pivot ?? start)
+            start = Position(col: min(anchor.start.col, cell.start.col), row: anchor.start.row)
+            end = Position(col: max(anchor.end.col, cell.end.col), row: cell.start.row)
+            pivot = anchor.start
+            setActiveAndNotify()
             return
         }
         if selectionMode != .character {

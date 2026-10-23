@@ -1416,7 +1416,14 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             let hit = calculateTapHit(gesture: gestureRecognizer).grid
             if withTerminal({ _ in selection.active }) {
                 stopSelectionTimer()
-                withTerminal { _ in selection.pivotExtend(bufferPosition: hit) }
+                withTerminal { _ in
+                    // With a hardware keyboard, Option held while dragging
+                    // selects a block, as on the Mac.
+                    if selection.selectionMode == .character {
+                        selection.rectangular = gestureRecognizer.modifierFlags.contains(.alternate)
+                    }
+                    selection.pivotExtend(bufferPosition: hit)
+                }
                 gestureRecognizer.setTranslation(CGPoint.zero, in: self)
                 if absoluteY < 0 || absoluteY > bounds.height {
                     startSelectionTimer {
@@ -1863,6 +1870,17 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
 
     /// When true, block element (U+2580-U+259F) and box drawing (U+2500-U+257F) characters use custom rendering.
     public var customBlockGlyphs: Bool = true {
+        didSet {
+            withTerminal { $0.updateFullScreen() }
+            frameDriver.markDirty()
+        }
+    }
+
+    /// Rounds the selection's corners by this many points, the outer corners of
+    /// a selection over several rows too, with the inner corners where one row
+    /// meets the next filled in to match. Zero, the default, keeps square cells.
+    /// The Metal renderer draws it; ``selectionOutline()`` gives the same shape.
+    public var selectionCornerRadius: CGFloat = 0 {
         didSet {
             withTerminal { $0.updateFullScreen() }
             frameDriver.markDirty()

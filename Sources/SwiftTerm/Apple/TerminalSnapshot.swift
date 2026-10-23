@@ -34,6 +34,8 @@ struct SnapshotStyle {
     var selectionActive: Bool
     var selectionStart: Position
     var selectionEnd: Position
+    /// A block selection: the same columns on every row (`SelectionService.rectangular`).
+    var selectionRectangular: Bool = false
     var linkHighlightRange: [Terminal.LinkMatch.RowRange]?
     var linkHighlightMode: LinkHighlightMode
     var commandActive: Bool
@@ -50,6 +52,7 @@ struct SnapshotStyle {
     func hasSameValue (as other: SnapshotStyle) -> Bool {
         selectionActive == other.selectionActive &&
             selectionStart == other.selectionStart && selectionEnd == other.selectionEnd &&
+            selectionRectangular == other.selectionRectangular &&
             linkHighlightRange == other.linkHighlightRange &&
             linkHighlightMode.tag == other.linkHighlightMode.tag &&
             commandActive == other.commandActive && textBlinkVisible == other.textBlinkVisible
@@ -66,23 +69,27 @@ struct SnapshotSelectionState: Sendable {
     let active: Bool
     let start: Position
     let end: Position
+    let rectangular: Bool
 
     static let empty = SnapshotSelectionState(
         active: false,
         start: Position(col: 0, row: 0),
-        end: Position(col: 0, row: 0))
+        end: Position(col: 0, row: 0),
+        rectangular: false)
 
     init (selection: SelectionService?) {
         selection?.terminal.terminalLock.preconditionLocked()
         active = selection?.active == true
         start = selection?.start ?? Position(col: 0, row: 0)
         end = selection?.end ?? Position(col: 0, row: 0)
+        rectangular = selection?.rectangular == true
     }
 
-    private init (active: Bool, start: Position, end: Position) {
+    private init (active: Bool, start: Position, end: Position, rectangular: Bool) {
         self.active = active
         self.start = start
         self.end = end
+        self.rectangular = rectangular
     }
 }
 
@@ -365,6 +372,7 @@ final class TerminalSnapshot {
             selectionActive: selection.active,
             selectionStart: selection.start,
             selectionEnd: selection.end,
+            selectionRectangular: selection.rectangular,
             linkHighlightRange: viewState.linkHighlightRange,
             linkHighlightMode: viewState.linkHighlightMode,
             commandActive: viewState.commandActive,

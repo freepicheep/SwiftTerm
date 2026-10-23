@@ -3843,6 +3843,19 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
         setNeedsDisplay(bounds)
     }
     
+    /// The modifier that makes a drag select a rectangular block of text
+    /// rather than wrapping across lines. Option by default, as in Terminal and
+    /// iTerm2; empty turns block selection off.
+    public var rectangularSelectionModifier: NSEvent.ModifierFlags = .option
+
+    /// A character drag selects a block while the block modifier is held, so
+    /// pressing or letting go of it mid-drag switches between the two.
+    private func updateRectangularSelection(for event: NSEvent) {
+        guard selection.selectionMode == .character else { return }
+        let modifier = rectangularSelectionModifier.intersection(.deviceIndependentFlagsMask)
+        selection.rectangular = !modifier.isEmpty && event.modifierFlags.contains(modifier)
+    }
+
     private func shiftBypassesMouseReporting(for event: NSEvent) -> Bool {
         withTerminal { _ in
             shiftBypassesMouseReportingLocked(for: event)
@@ -4062,10 +4075,12 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
                 return (hit, false)
             }
             if selection.active {
+                updateRectangularSelection(for: event)
                 selection.dragExtend(bufferPosition: hit)
             } else if let pressGrid = pointerPressGrid {
                 selection.setSoftStart(bufferPosition: pressGrid)
                 selection.startSelection()
+                updateRectangularSelection(for: event)
                 selection.dragExtend(bufferPosition: hit)
             }
             return (hit, true)
@@ -4136,10 +4151,12 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
             }
 
             if selection.active {
+                updateRectangularSelection(for: event)
                 selection.dragExtend(bufferPosition: Position(col: hit.col, row: hit.row))
             } else {
                 selection.setSoftStart(bufferPosition: pointerPressGrid ?? hit)
                 selection.startSelection()
+                updateRectangularSelection(for: event)
                 selection.dragExtend(bufferPosition: hit)
             }
             return (hit, displayBuffer.yDisp, displayBuffer.rows, false)

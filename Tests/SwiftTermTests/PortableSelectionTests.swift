@@ -37,6 +37,38 @@ final class PortableSelectionTests: XCTestCase, TerminalDelegate {
         XCTAssertEqual(terminal.selectionText(selection), "89")
     }
 
+    func testRectangularSelection() {
+        let (terminal, selection) = makeTerminal()
+        feed("abcdef\r\nghijkl\r\nmnopqr", into: terminal, selection: selection)
+        terminal.updateSelection(selection, action: 0, column: 1, row: 0, rectangular: true)
+        terminal.updateSelection(selection, action: 1, column: 3, row: 2, rectangular: true)
+        XCTAssertEqual(terminal.selectionText(selection), "bcd\nhij\nnop")
+        XCTAssertEqual(terminal.selectionState(selection).spans.map { $0.startColumn..<$0.endColumn },
+                       [1..<4, 1..<4, 1..<4])
+        // Dragged back past its start, up and left, it's the same block.
+        terminal.updateSelection(selection, action: 0, column: 3, row: 2, rectangular: true)
+        terminal.updateSelection(selection, action: 1, column: 1, row: 0, rectangular: true)
+        XCTAssertEqual(terminal.selectionText(selection), "bcd\nhij\nnop")
+        // Down and left: still the block between the two cells.
+        terminal.updateSelection(selection, action: 0, column: 3, row: 0, rectangular: true)
+        terminal.updateSelection(selection, action: 1, column: 1, row: 2, rectangular: true)
+        XCTAssertEqual(terminal.selectionText(selection), "bcd\nhij\nnop")
+        // Letting go of the key mid-drag goes back to a run of text.
+        terminal.updateSelection(selection, action: 1, column: 1, row: 2, rectangular: false)
+        XCTAssertFalse(selection.rectangular)
+        XCTAssertEqual(terminal.selectionText(selection), "def\nghijkl\nmn")
+    }
+
+    func testRectangularTextDropsPaddingAndKeepsShortRows() {
+        let (terminal, selection) = makeTerminal()
+        feed("ab\r\nabcdefgh\r\na", into: terminal, selection: selection)
+        terminal.updateSelection(selection, action: 0, column: 1, row: 0, rectangular: true)
+        terminal.updateSelection(selection, action: 1, column: 4, row: 2, rectangular: true)
+        XCTAssertEqual(terminal.selectionText(selection), "b\nbcde\n")
+        terminal.updateSelection(selection, action: 2)
+        XCTAssertFalse(selection.rectangular)
+    }
+
     func testWideCombiningAndEmojiCells() {
         let (terminal, selection) = makeTerminal()
         feed("a界e\u{301}😀z", into: terminal, selection: selection)

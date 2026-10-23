@@ -493,7 +493,13 @@ struct SnapshotSelectionResolver {
         var lower = 0
         var upper = 0
 
-        if start.row == end.row, row == start.row {
+        if style.selectionRectangular {
+            // A block: the same columns on every row between the two ends.
+            guard row >= min(start.row, end.row), row <= max(start.row, end.row) else { return nil }
+            lower = min(start.col, end.col)
+            let right = max(start.col, end.col)
+            upper = right + (right == cols - 1 ? 1 : 0)
+        } else if start.row == end.row, row == start.row {
             if start.col < end.col {
                 lower = start.col
                 upper = end.col + (end.col == cols - 1 ? 1 : 0)
@@ -2826,6 +2832,7 @@ extension TerminalView {
             selectionActive: selection?.active == true,
             selectionStart: selection?.start ?? Position(col: 0, row: 0),
             selectionEnd: selection?.end ?? Position(col: 0, row: 0),
+            selectionRectangular: selection?.rectangular == true,
             linkHighlightRange: linkHighlightRange,
             linkHighlightMode: linkHighlightMode,
             commandActive: commandActive,

@@ -5025,7 +5025,10 @@ extension TerminalView {
         var down = CGAffineTransform(translationX: 0, y: contentOffset.y)
         return outline.copy(using: &down)
 #else
-        return outline
+        // The rows hang from the top of a view that counts up from its bottom.
+        guard !isFlipped else { return outline }
+        var up = CGAffineTransform(a: 1, b: 0, c: 0, d: -1, tx: 0, ty: bounds.height)
+        return outline.copy(using: &up)
 #endif
     }
 

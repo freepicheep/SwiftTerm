@@ -574,6 +574,7 @@ struct FrameViewState: Sendable {
     let selectionCornerRadius: CGFloat
     /// Where a smooth scroll stands between rows (Metal on the Mac only).
     let smoothScroll: SmoothScrollState?
+    let cursorMotion: CursorMotion?
 
     var effectiveForegroundColor: FrameColor { appearance.effectiveForegroundColor }
     var effectiveBackgroundColor: FrameColor { appearance.effectiveBackgroundColor }
@@ -622,6 +623,7 @@ struct FrameViewState: Sendable {
 #else
         smoothScroll = nil
 #endif
+        cursorMotion = view.cursorMotion
     }
 }
 
@@ -703,6 +705,8 @@ struct SnapshotRenderContext {
     /// Above zero, the selection is drawn as its own rounded shape rather than
     /// as cell backgrounds (`TerminalView.selectionCornerRadius`), in points.
     let selectionCornerRadius: CGFloat
+    /// How the cursor moves between cells (`TerminalView.cursorMotion`).
+    let cursorMotion: CursorMotion?
     let cols: Int
 
     /// Identifies the values used to build attributed-string dictionaries.
@@ -765,6 +769,7 @@ struct SnapshotRenderContext {
         bidiHostPolicy = viewState.bidiHostPolicy
         glyphFallbackProvider = viewState.glyphFallbackProvider
         selectionCornerRadius = viewState.selectionCornerRadius
+        cursorMotion = viewState.cursorMotion
         self.cols = cols
 
         var identityHasher = Hasher()
@@ -1480,6 +1485,9 @@ extension TerminalView {
         let notifyUI: @MainActor @Sendable () -> Void = { [weak self] in
             guard let self else { return }
             self.ensureCaretIsVisible()
+#if canImport(MetalKit)
+            owner.noteMetalCursorInput()
+#endif
             if self.cursorBlinkResetsOnInput {
                 self.caretView?.resetBlinkAfterInput()
 #if canImport(MetalKit)

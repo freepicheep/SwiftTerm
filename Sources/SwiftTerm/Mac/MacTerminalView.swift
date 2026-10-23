@@ -1461,6 +1461,13 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
         }
     }
 
+    /// Moves the cursor from cell to cell rather than jumping, drawn by the
+    /// Metal renderer. `nil`, the default, keeps a cursor that jumps. See
+    /// ``CursorMotion``.
+    public var cursorMotion: CursorMotion? = nil {
+        didSet { frameDriver.markDirty() }
+    }
+
     /// Host-supplied fallback for symbol glyphs (for example Nerd Font icons)
     /// that the selected font does not contain. `nil`, the default, disables
     /// the feature entirely. See ``TerminalGlyphFallbackProvider``.

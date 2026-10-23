@@ -853,6 +853,12 @@ final class TerminalRenderOwner: Sendable {
         withRenderState { $0.renderer?.resetCursorBlinkAfterInput() }
     }
 
+    /// The user sent input: a cursor move now follows it (`CursorMotion.followsInputOnly`).
+    @MainActor
+    func noteMetalCursorInput() {
+        withRenderState { $0.renderer?.noteCursorInput() }
+    }
+
     var metalHasPreparedSnapshot: Bool {
         withRenderState { $0.renderer?.hasPreparedSnapshot == true }
     }

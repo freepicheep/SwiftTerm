@@ -609,6 +609,9 @@ struct DrawData {
     /// How far down everything is drawn, in pixels, while a smooth scroll is part way
     /// between rows (`TerminalSnapshot.scrollOffset`).
     var scrollOffsetPixels: Float = 0
+    /// A cursor on its way to its cell (`TerminalView.cursorMotion`), drawn in
+    /// place of the cell's cursor until it arrives.
+    var cursorQuad: CursorQuad? = nil
 }
 
 struct KittyImageSignature: Hashable {
@@ -624,6 +627,23 @@ struct ClipRect {
     let minY: Float
     let maxX: Float
     let maxY: Float
+}
+
+/// A moving cursor (`TerminalView.cursorMotion`): four corners that each ease
+/// toward the cell on their own, in the drawable's pixels. Matches `CursorQuad`
+/// in Shaders.metal.
+struct CursorQuad {
+    var c0: SIMD2<Float>
+    var c1: SIMD2<Float>
+    var c2: SIMD2<Float>
+    var c3: SIMD2<Float>
+    var color: SIMD4<Float>
+
+    var bounds: ClipRect {
+        let lo = simd_min(simd_min(c0, c1), simd_min(c2, c3))
+        let hi = simd_max(simd_max(c0, c1), simd_max(c2, c3))
+        return ClipRect(minX: lo.x, minY: lo.y, maxX: hi.x, maxY: hi.y)
+    }
 }
 
 struct CustomGlyphKey: Hashable {
@@ -922,6 +942,8 @@ final class MetalRedrawState: Sendable {
         var pendingRedraw = false
         var cursorBlinkOn = true
         var cursorBlinkWanted = false
+        /// When the user last sent input (`systemUptime`), for `CursorMotion.followsInputOnly`.
+        var lastInput = -Double.infinity
         var callbackConfigured = false
         var callback: RedrawCallback?
     }
@@ -980,6 +1002,14 @@ final class MetalRedrawState: Sendable {
 
     func resetCursorBlink() {
         state.withLock { $0.cursorBlinkOn = true }
+    }
+
+    func noteInput(at time: Double) {
+        state.withLock { $0.lastInput = time }
+    }
+
+    var lastInput: Double {
+        state.withLock { $0.lastInput }
     }
 
     func toggleCursorBlink() {
@@ -1108,6 +1138,9 @@ final class MetalTerminalRenderer {
     private var atlasInvalidatedDuringBuild = false
     private let redrawState: MetalRedrawState
     private let cursorBlinkController: MetalCursorBlinkController
+    private let cursorPipeline: MTLRenderPipelineState
+    /// Where a moving cursor has got to (`TerminalView.cursorMotion`).
+    private var cursorMotionSolver = CursorMotionSolver()
     private let frameSemaphore = DispatchSemaphore(value: 1)
     private let redrawLock = NSLock()
     private var activeProfileCounters = MetalProfileCounters()
@@ -1300,9 +1333,15 @@ final class MetalTerminalRenderer {
                                                                               library: library,
                                                                               pixelFormat: pixelFormat,
                                                                               vertexName: "terminal_selection_vertex",
-                                                                              fragmentName: "terminal_selection_fragment") else {
+                                                                              fragmentName: "terminal_selection_fragment"),
+              let cursorPipeline = MetalTerminalRenderer.makeColorPipeline(device: device,
+                                                                           library: library,
+                                                                           pixelFormat: pixelFormat,
+                                                                           vertexName: "terminal_cursor_vertex",
+                                                                           fragmentName: "terminal_cursor_fragment") else {
             throw MetalError.pipelineCreationFailed("text/color/cell")
         }
+        self.cursorPipeline = cursorPipeline
         self.selectionPipeline = selectionPipeline
         self.textPipeline = textPipeline
         self.textGrayPipeline = textGrayPipeline
@@ -1437,6 +1476,10 @@ final class MetalTerminalRenderer {
         buildInterval.end()
         if capturesDrawData {
             lastDrawData = drawData
+        }
+        if drawData.cursorQuad != nil {
+            // The cursor is still on its way: another frame once this one is done.
+            markPendingRedraw()
         }
 #if canImport(os)
         if MetalTerminalRenderer.profileEnabled {
@@ -1580,6 +1623,15 @@ final class MetalTerminalRenderer {
                 encoder.setVertexBytes(&viewportVar, length: MemoryLayout<SIMD4<Float>>.stride, index: 1)
                 encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: drawData.cursorColorVertices.count)
             }
+        }
+
+        if var quad = drawData.cursorQuad {
+            encoder.setRenderPipelineState(cursorPipeline)
+            encoder.setVertexBytes(&quad, length: MemoryLayout<CursorQuad>.stride, index: 0)
+            var viewportVar = viewport
+            encoder.setVertexBytes(&viewportVar, length: MemoryLayout<SIMD4<Float>>.stride, index: 1)
+            encoder.setFragmentBytes(&quad, length: MemoryLayout<CursorQuad>.stride, index: 0)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
         }
 
         if !drawData.cursorGlyphVerticesGray.isEmpty {
@@ -1919,7 +1971,8 @@ final class MetalTerminalRenderer {
                                                        lastRow: lastRow,
                                                        yDisp: visibleDisp,
                                                        scale: scale),
-                        scrollOffsetPixels: Float(snapshot.scrollOffset * scale))
+                        scrollOffsetPixels: Float(snapshot.scrollOffset * scale),
+                        cursorQuad: cursorData.quad)
     }
 
     /// A rounded selection's pieces on screen, in the drawable's pixels (up from
@@ -4006,23 +4059,20 @@ final class MetalTerminalRenderer {
                                      firstRow: Int,
                                      lastRow: Int) -> (colorVertices: [ColorVertex],
                                                        glyphVerticesGray: [GlyphVertex],
-                                                       glyphVerticesColor: [GlyphVertex]) {
+                                                       glyphVerticesColor: [GlyphVertex],
+                                                       quad: CursorQuad?) {
         guard let cursor = snapshot.cursor, !cursor.hidden else {
-            return ([], [], [])
+            return ([], [], [], nil)
         }
         let cursorRow = cursor.absoluteRow
         if cursorRow < firstRow || cursorRow > lastRow {
-            return ([], [], [])
+            return ([], [], [], nil)
         }
         if cursor.visualCol < 0 || cursor.visualCol >= snapshot.cols {
-            return ([], [], [])
+            return ([], [], [], nil)
         }
         let cursorStyle = snapshot.cursorStyle
         let hasFocus = context.cursorHasFocus
-        let blinkOn = redrawState.cursorBlinkOn
-        if hasFocus && isBlinkStyle(cursorStyle) && !blinkOn {
-            return ([], [], [])
-        }
         let lineOffset = cellHeight * CGFloat(cursorRow - yDisp + 1)
         let lineOrigin = CGPoint(x: 0, y: context.viewBounds.height - lineOffset)
         let lineOriginPx = CGPoint(x: lineOrigin.x * scale, y: lineOrigin.y * scale)
@@ -4041,7 +4091,45 @@ final class MetalTerminalRenderer {
 
         let renderData = cursor.renderData
         let cursorColor = colorToSIMD(renderData.cursorColor)
-        let cursorClip = ClipRect(minX: Float(x0), minY: Float(y0), maxX: Float(x1), maxY: Float(y1))
+
+        // A cursor on its way here (`TerminalView.cursorMotion`) is drawn where it
+        // has got to, as a quad of its own, in place of the one in the cell.
+        var moving: CursorQuad?
+        if hasFocus, let motion = context.cursorMotion {
+            let body: CGRect
+            switch cursorStyle {
+            case .blinkBar, .steadyBar:
+                body = CGRect(x: x0, y: y0, width: max(1, 2 * scale), height: y1 - y0)
+            case .blinkUnderline, .steadyUnderline:
+                body = CGRect(x: x0, y: y0, width: x1 - x0, height: max(1, 2 * scale))
+            case .blinkBlock, .steadyBlock:
+                body = CGRect(x: x0, y: y0, width: x1 - x0, height: y1 - y0)
+            }
+            let now = ProcessInfo.processInfo.systemUptime
+            let animate = !motion.followsInputOnly || now - redrawState.lastInput <= motion.inputWindow
+            let geometry = SIMD4<Float>(Float(cellWidthPx), Float(cellHeightPx),
+                                        Float(context.viewBounds.width * scale),
+                                        Float(context.viewBounds.height * scale))
+            if let at = cursorMotionSolver.update(rect: body, geometry: geometry, motion: motion,
+                                                  animate: animate, time: now) {
+                moving = CursorQuad(c0: at.0, c1: at.1, c2: at.2, c3: at.3, color: cursorColor)
+            }
+        } else {
+            cursorMotionSolver.reset()
+        }
+
+        // A cursor in motion shows whatever the blink says.
+        if moving == nil && hasFocus && isBlinkStyle(cursorStyle) && !redrawState.cursorBlinkOn {
+            return ([], [], [], nil)
+        }
+
+        var cursorClip = ClipRect(minX: Float(x0), minY: Float(y0), maxX: Float(x1), maxY: Float(y1))
+        if let moving {
+            // The character under a block shows only once the block has reached it.
+            let over = moving.bounds
+            cursorClip = ClipRect(minX: max(cursorClip.minX, over.minX), minY: max(cursorClip.minY, over.minY),
+                                  maxX: min(cursorClip.maxX, over.maxX), maxY: min(cursorClip.maxY, over.maxY))
+        }
         var colorVertices: [ColorVertex] = []
         var glyphVerticesGray: [GlyphVertex] = []
         var glyphVerticesColor: [GlyphVertex] = []
@@ -4070,10 +4158,14 @@ final class MetalTerminalRenderer {
                                                           x1: CGFloat(x1),
                                                           y1: CGFloat(y1 - stroke),
                                                           color: cursorColor))
-            return (colorVertices, [], [])
+            return (colorVertices, [], [], nil)
         }
 
         switch cursorStyle {
+        case _ where moving != nil:
+            if cursorStyle != .blinkBlock && cursorStyle != .steadyBlock {
+                return ([], [], [], moving)
+            }
         case .blinkBar, .steadyBar:
             let barWidth = max(1, 2 * scale)
             colorVertices.append(contentsOf: quadVertices(x0: CGFloat(x0),
@@ -4081,7 +4173,7 @@ final class MetalTerminalRenderer {
                                                           x1: CGFloat(x0 + barWidth),
                                                           y1: CGFloat(y1),
                                                           color: cursorColor))
-            return (colorVertices, [], [])
+            return (colorVertices, [], [], nil)
         case .blinkUnderline, .steadyUnderline:
             let underlineHeight = max(1, 2 * scale)
             colorVertices.append(contentsOf: quadVertices(x0: CGFloat(x0),
@@ -4089,7 +4181,7 @@ final class MetalTerminalRenderer {
                                                           x1: CGFloat(x1),
                                                           y1: CGFloat(y0 + underlineHeight),
                                                           color: cursorColor))
-            return (colorVertices, [], [])
+            return (colorVertices, [], [], nil)
         case .blinkBlock, .steadyBlock:
             colorVertices.append(contentsOf: quadVertices(x0: CGFloat(x0),
                                                           y0: CGFloat(y0),
@@ -4100,7 +4192,7 @@ final class MetalTerminalRenderer {
 
         let caretTextColor = renderData.textColor
         if !snapshot.style.textBlinkVisible && renderData.cellAttribute.style.contains(.blink) {
-            return (colorVertices, [], [])
+            return (colorVertices, [], [], moving)
         }
         if PowerlineRenderer.shouldRender(codePoint: UInt32(renderData.code),
                                           customGlyphsEnabled: renderData.customBlockGlyphs) {
@@ -4134,7 +4226,7 @@ final class MetalTerminalRenderer {
                                                                            color: colorToSIMD(caretTextColor)))
                 }
             }
-            return (colorVertices, glyphVerticesGray, glyphVerticesColor)
+            return (colorVertices, glyphVerticesGray, glyphVerticesColor, moving)
         }
         let attributes = renderData.attributes.isEmpty
             ? [.font: renderData.normalFont] : renderData.attributes
@@ -4147,7 +4239,7 @@ final class MetalTerminalRenderer {
             attributes: attributes)
         let ctline = CTLineCreateWithAttributedString(attributedString)
         guard let runs = CTLineGetGlyphRuns(ctline) as? [CTRun] else {
-            return (colorVertices, [], [])
+            return (colorVertices, [], [], moving)
         }
         let yOffset = context.baselineOffset
         let textColorSIMD = colorToSIMD(caretTextColor)
@@ -4242,7 +4334,7 @@ final class MetalTerminalRenderer {
             }
         }
 
-        return (colorVertices, glyphVerticesGray, glyphVerticesColor)
+        return (colorVertices, glyphVerticesGray, glyphVerticesColor, moving)
     }
 
     private func texture(for image: SnapshotImage) -> MTLTexture? {
@@ -4737,6 +4829,12 @@ final class MetalTerminalRenderer {
         cursorBlinkController.resetAfterInput()
     }
 
+    /// The user sent input; a cursor move that follows soon after animates
+    /// (`CursorMotion.followsInputOnly`). Safe from any thread.
+    func noteCursorInput() {
+        redrawState.noteInput(at: ProcessInfo.processInfo.systemUptime)
+    }
+
     private func pruneKittyTextureCache(kitty: SnapshotKitty) {
         let liveIds = kitty.renderSnapshot.imagesById
         if kittyTextureCache.isEmpty {
@@ -4800,7 +4898,9 @@ final class MetalTerminalRenderer {
             "terminal_cell_color_vertex",
             "terminal_color_fragment",
             "terminal_selection_vertex",
-            "terminal_selection_fragment"
+            "terminal_selection_fragment",
+            "terminal_cursor_vertex",
+            "terminal_cursor_fragment"
         ]
     }
 

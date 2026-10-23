@@ -296,6 +296,10 @@ final class TerminalSnapshot {
 
     var firstRow = 0
     var yDisp = 0
+    /// How far below their places the rows are drawn, in points, while a smooth
+    /// scroll is part way between rows; `firstRow` is then the row above the
+    /// screen, which shows at the top.
+    var scrollOffset: CGFloat = 0
     var yBase = 0
     var x = 0
     var y = 0
@@ -384,7 +388,15 @@ final class TerminalSnapshot {
         let bidiInputsChanged = previousBidiHostPolicy != viewState.bidiHostPolicy ||
             previousBidiFont != bidiFont
 
-        firstRow = buffer.yDisp
+        // Only for the rows it was made for: anything else that scrolls (typing,
+        // output at the bottom, the scroller) leaves the rows in their places.
+        if let smooth = viewState.smoothScroll, smooth.yDisp == buffer.yDisp,
+           smooth.offset > 0, buffer.yDisp > 0 {
+            scrollOffset = smooth.offset
+        } else {
+            scrollOffset = 0
+        }
+        firstRow = buffer.yDisp - (scrollOffset > 0 ? 1 : 0)
         yDisp = buffer.yDisp
         yBase = buffer.yBase
         x = buffer.x
@@ -402,7 +414,7 @@ final class TerminalSnapshot {
         style = newStyle
         ansiColors = terminal.ansiColors
 
-        let visibleCount = max(0, min(buffer.rows, buffer.lines.count - firstRow))
+        let visibleCount = max(0, min(buffer.rows + (yDisp - firstRow), buffer.lines.count - firstRow))
         while rows.count > visibleCount {
             rowPool.append(rows.removeLast())
         }

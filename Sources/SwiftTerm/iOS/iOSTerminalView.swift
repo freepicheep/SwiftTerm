@@ -1876,6 +1876,17 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         }
     }
 
+    /// Rounds the selection's corners by this many points, the outer corners of
+    /// a selection over several rows too, with the inner corners where one row
+    /// meets the next filled in to match. Zero, the default, keeps square cells.
+    /// The Metal renderer draws it; ``selectionOutline()`` gives the same shape.
+    public var selectionCornerRadius: CGFloat = 0 {
+        didSet {
+            withTerminal { $0.updateFullScreen() }
+            frameDriver.markDirty()
+        }
+    }
+
     /// Host-supplied fallback for symbol glyphs (for example Nerd Font icons)
     /// that the selected font does not contain. `nil`, the default, disables
     /// the feature entirely. See ``TerminalGlyphFallbackProvider``.

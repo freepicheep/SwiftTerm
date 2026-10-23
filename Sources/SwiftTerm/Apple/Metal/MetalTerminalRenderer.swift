@@ -359,6 +359,21 @@ struct ColorCell {
     var color: SIMD4<Float>
 }
 
+/// A piece of a rounded selection (`TerminalView.selectionCornerRadius`): one
+/// row's run of selected cells with its own corner radii, or a fillet that
+/// rounds the inside corner where one row's run meets the next.
+struct SelectionCell {
+    var position: SIMD2<Float>
+    var size: SIMD2<Float>
+    var color: SIMD4<Float>
+    /// A run's corner radii in pixels: top left, top right, bottom right,
+    /// bottom left, with the top up the screen.
+    var radii: SIMD4<Float>
+    /// x: 0 for a run, 1 for a fillet; for a fillet, yz is the centre of the
+    /// circle it leaves out, in the cell's own pixels, and w its radius.
+    var shape: SIMD4<Float>
+}
+
 struct ImageDraw {
     let texture: MTLTexture
     let vertices: [GlyphVertex]
@@ -589,6 +604,8 @@ struct DrawData {
     var cursorColorVertices: [ColorVertex]
     var cursorGlyphVerticesGray: [GlyphVertex]
     var cursorGlyphVerticesColor: [GlyphVertex]
+    /// A rounded selection, drawn over the cells' backgrounds and under their text.
+    var selectionCells: [SelectionCell] = []
 }
 
 struct KittyImageSignature: Hashable {
@@ -1057,6 +1074,7 @@ final class MetalTerminalRenderer {
     private let cellTextPipeline: MTLRenderPipelineState
     private let cellTextGrayPipeline: MTLRenderPipelineState
     private let cellColorPipeline: MTLRenderPipelineState
+    private let selectionPipeline: MTLRenderPipelineState
     private let sampler: MTLSamplerState
     private let textureLoader: MTKTextureLoader
     private let bufferPool: BufferPool
@@ -1274,9 +1292,15 @@ final class MetalTerminalRenderer {
                                                                               library: library,
                                                                               pixelFormat: pixelFormat,
                                                                               vertexName: "terminal_cell_color_vertex",
-                                                                              fragmentName: "terminal_color_fragment") else {
+                                                                              fragmentName: "terminal_color_fragment"),
+              let selectionPipeline = MetalTerminalRenderer.makeColorPipeline(device: device,
+                                                                              library: library,
+                                                                              pixelFormat: pixelFormat,
+                                                                              vertexName: "terminal_selection_vertex",
+                                                                              fragmentName: "terminal_selection_fragment") else {
             throw MetalError.pipelineCreationFailed("text/color/cell")
         }
+        self.selectionPipeline = selectionPipeline
         self.textPipeline = textPipeline
         self.textGrayPipeline = textGrayPipeline
         self.colorPipeline = colorPipeline
@@ -1469,7 +1493,7 @@ final class MetalTerminalRenderer {
         let viewport = SIMD2<Float>(Float(drawableSize.width), Float(drawableSize.height))
 
         if let frame = drawData.frame {
-            drawFrameData(frame, encoder: encoder, viewport: viewport)
+            drawFrameData(frame, selection: drawData.selectionCells, encoder: encoder, viewport: viewport)
         } else {
             let rows = drawData.rows
             drawImageRows(rows: rows,
@@ -1497,6 +1521,12 @@ final class MetalTerminalRenderer {
                               texture: nil,
                               encoder: encoder,
                               viewport: viewport)
+
+            drawCellBuffer(drawData.selectionCells,
+                           pipeline: selectionPipeline,
+                           texture: nil,
+                           encoder: encoder,
+                           viewport: viewport)
 
             drawVertexBuffers(rows: rows,
                               bufferKey: \.glyphGrayBuffer,
@@ -1877,7 +1907,58 @@ final class MetalTerminalRenderer {
                         frame: frameData,
                         cursorColorVertices: cursorData.colorVertices,
                         cursorGlyphVerticesGray: cursorData.glyphVerticesGray,
-                        cursorGlyphVerticesColor: cursorData.glyphVerticesColor)
+                        cursorGlyphVerticesColor: cursorData.glyphVerticesColor,
+                        selectionCells: selectionCells(context: context,
+                                                       firstRow: firstRow,
+                                                       lastRow: lastRow,
+                                                       yDisp: visibleDisp,
+                                                       scale: scale))
+    }
+
+    /// A rounded selection's pieces on screen, in the drawable's pixels (up from
+    /// the bottom left). The rows just off screen decide the corners at its edges.
+    private func selectionCells(context: SnapshotRenderContext,
+                                firstRow: Int,
+                                lastRow: Int,
+                                yDisp: Int,
+                                scale: CGFloat) -> [SelectionCell] {
+        guard context.selectionCornerRadius > 0 else {
+            return []
+        }
+        let runs = ((firstRow - 1)...(lastRow + 1)).compactMap { row in
+            context.selection.columns(forRow: row).map { SelectionShape.Run(row: row - yDisp, columns: $0) }
+        }
+        guard !runs.isEmpty else {
+            return []
+        }
+        let shape = SelectionShape(runs: runs,
+                                   cell: CGSize(width: context.cellDimension.width * scale,
+                                                height: context.cellDimension.height * scale),
+                                   radius: context.selectionCornerRadius * scale)
+        let height = Float(context.viewBounds.height * scale)
+        let color = colorToSIMD(context.selectedTextBackgroundColor)
+        let (pieces, fillets) = shape.pieces()
+        var cells: [SelectionCell] = []
+        cells.reserveCapacity(pieces.count + fillets.count)
+        for piece in pieces {
+            let r = piece.rect
+            cells.append(SelectionCell(position: SIMD2(Float(r.minX), height - Float(r.maxY)),
+                                       size: SIMD2(Float(r.width), Float(r.height)),
+                                       color: color,
+                                       radii: SIMD4(Float(piece.topLeft), Float(piece.topRight),
+                                                    Float(piece.bottomRight), Float(piece.bottomLeft)),
+                                       shape: .zero))
+        }
+        for fillet in fillets {
+            let s = fillet.square
+            cells.append(SelectionCell(position: SIMD2(Float(s.minX), height - Float(s.maxY)),
+                                       size: SIMD2(Float(s.width), Float(s.height)),
+                                       color: color,
+                                       radii: .zero,
+                                       shape: SIMD4(1, Float(fillet.center.x - s.minX),
+                                                    Float(s.maxY - fillet.center.y), Float(fillet.radius))))
+        }
+        return cells
     }
 
     private func visibleRowRange(snapshot: TerminalSnapshot) -> (Int, Int, Int)? {
@@ -2031,8 +2112,12 @@ final class MetalTerminalRenderer {
                     continue
                 }
                 let runAttributes = run.attributes
+                // A rounded selection is drawn as a shape of its own, over the
+                // cells' own backgrounds (`selectionCells`).
+                let paintsSelection = context.selectionCornerRadius == 0
+                    && runAttributes.keys.contains(.selectionBackgroundColor)
                 var backgroundColor: TTColor?
-                if runAttributes.keys.contains(.selectionBackgroundColor) {
+                if paintsSelection {
                     backgroundColor = runAttributes[.selectionBackgroundColor] as? TTColor
                 } else if runAttributes.keys.contains(.backgroundColor) {
                     backgroundColor = runAttributes[.backgroundColor] as? TTColor
@@ -2040,8 +2125,7 @@ final class MetalTerminalRenderer {
                 // Default-background cells emit no quad. The pass clear
                 // paints them, so Kitty images below explicit cell
                 // backgrounds remain visible through these cells.
-                let hasExplicitBackground =
-                    runAttributes.keys.contains(.selectionBackgroundColor)
+                let hasExplicitBackground = paintsSelection
                     || runAttributes.keys.contains(SwiftTermExplicitBackgroundKey)
                 if hasExplicitBackground, let backgroundColor {
                     let startColumn = shaped.segment.column
@@ -2320,9 +2404,11 @@ final class MetalTerminalRenderer {
 
         for run in plain.runs {
             let style = run.style
-            let explicit = style.selectionBackground != nil || style.explicitBackground
+            // A rounded selection is drawn as a shape of its own (`selectionCells`).
+            let selection = context.selectionCornerRadius == 0 ? style.selectionBackground : nil
+            let explicit = selection != nil || style.explicitBackground
             if explicit {
-                let color = style.selectionBackground.map { colorToSIMD($0) } ?? colorToSIMD(style.background)
+                let color = selection.map { colorToSIMD($0) } ?? colorToSIMD(style.background)
                 prepared.backgrounds.append(PreparedBackground(startColumn: run.start,
                                                                columnSpan: run.end - run.start,
                                                                color: color))
@@ -3772,7 +3858,8 @@ final class MetalTerminalRenderer {
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: cells.count * 6)
     }
 
-    private func drawFrameData(_ frame: FrameDrawData, encoder: MTLRenderCommandEncoder, viewport: SIMD2<Float>) {
+    private func drawFrameData(_ frame: FrameDrawData, selection: [SelectionCell],
+                               encoder: MTLRenderCommandEncoder, viewport: SIMD2<Float>) {
         drawImageBatches(frame.belowBackgroundImageDraws, encoder: encoder, viewport: viewport)
 
         drawCellBuffer(frame.backgroundCells,
@@ -3785,6 +3872,12 @@ final class MetalTerminalRenderer {
 
         drawCellBuffer(frame.powerlineJoinCells,
                        pipeline: cellColorPipeline,
+                       texture: nil,
+                       encoder: encoder,
+                       viewport: viewport)
+
+        drawCellBuffer(selection,
+                       pipeline: selectionPipeline,
                        texture: nil,
                        encoder: encoder,
                        viewport: viewport)
@@ -4695,7 +4788,9 @@ final class MetalTerminalRenderer {
             "terminal_text_fragment_gray",
             "terminal_color_vertex",
             "terminal_cell_color_vertex",
-            "terminal_color_fragment"
+            "terminal_color_fragment",
+            "terminal_selection_vertex",
+            "terminal_selection_fragment"
         ]
     }
 

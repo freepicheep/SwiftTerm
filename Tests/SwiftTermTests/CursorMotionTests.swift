@@ -88,7 +88,8 @@ import AppKit
     }
 
     @Test(.enabled(if: MetalRowCacheTests.metalIsUsable)) func aMoveAfterInputTravels() async throws {
-        let harness = try Self.harness(.smear)
+        // A wide window for the input, so a loaded machine doesn't make the move stale.
+        let harness = try Self.harness(CursorMotion(duration: 0.05, stretch: 1, inputWindow: 60))
         _ = try #require(await harness.frame())
         #expect(harness.renderer.lastDrawData?.cursorQuad == nil)
 

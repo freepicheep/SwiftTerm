@@ -1868,6 +1868,13 @@ extension TerminalView {
         frameSignal.markDirty()
     }
 
+    /// Changes the style a program returns to when it asks for the default
+    /// (`CSI 0 SP q`), and the cursor on show too unless a program chose it.
+    public func setDefaultCursorStyle(_ style: CursorStyle) {
+        renderOwner.setDefaultCursorStyle(style)
+        frameSignal.markDirty()
+    }
+
     /// Strategy used to derive palette entries 16 through 255.
     public var ansi256PaletteStrategy: Ansi256PaletteStrategy {
         get { renderOwner.ansi256PaletteStrategy() }

@@ -58,5 +58,39 @@ struct MetalSmoothScrollTests {
         let back = try #require(await harness.frame())
         #expect(back.pixels == plain.pixels)
     }
+
+    /// Part way between rows, the mouse lands on the row drawn under it, and the
+    /// selection's outline (for a glow drawn over it) sits on the rows as drawn.
+    @Test(.enabled(if: MetalRowCacheTests.metalIsUsable))
+    func mouseAndOutlineFollowTheRowsDrawnLower() throws {
+        let harness = try #require(Harness(cols: 40, rows: 10, scrollback: 200))
+        let view = harness.view
+        for i in 0..<60 { view.feed(text: "line \(i)\r\n") }
+        view.scrollTo(row: 20)
+        let cell = view.cellDimension!
+        let top = view.bounds.maxY
+        view.withTerminal { _ in
+            view.selection.setSelection(start: Position(col: 2, row: 19), end: Position(col: 6, row: 21))
+        }
+        let plain = try #require(view.selectionOutline()).boundingBoxOfPath
+
+        let offset = (cell.height * 0.6).rounded()
+        view.smoothScrollState = SmoothScrollState(yDisp: 20, offset: offset)
+        // In the gap at the top: the row above, drawn there.
+        #expect(view.calculateMouseHit(at: CGPoint(x: 1, y: top - offset / 2)).grid.row == 19)
+        // Just above the top row's drawn edge: still the row above, though without
+        // the scroll the top row would be there.
+        #expect(view.calculateMouseHit(at: CGPoint(x: 1, y: top - offset + 1)).grid.row == 19)
+        // Just below the top row's drawn edge: the top row.
+        #expect(view.calculateMouseHit(at: CGPoint(x: 1, y: top - offset - 1)).grid.row == 20)
+        #expect(view.calculateMouseHit(at: CGPoint(x: 1, y: top - offset - cell.height - 1)).grid.row == 21)
+
+        // The outline takes in the row above and moves down with the rows.
+        let lower = try #require(view.selectionOutline()).boundingBoxOfPath
+        #expect(abs(lower.maxY - (top - offset + cell.height)) < 0.5)
+        #expect(abs(lower.minY - (plain.minY - offset)) < 0.5)
+        view.smoothScrollState = nil
+        #expect(try #require(view.selectionOutline()).boundingBoxOfPath == plain)
+    }
 }
 #endif

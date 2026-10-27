@@ -3768,7 +3768,13 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
         }
         let displayBuffer = terminal.displayBuffer
         let col = Int (point.x / cellDimension.width)
-        let row = Int ((frame.height-point.y) / cellDimension.height)
+        // Part way through a smooth scroll the rows are drawn lower, the row
+        // above the top showing in the gap.
+        let offset = smoothScrollOffset(yDisp: displayBuffer.yDisp)
+        let fromTop = frame.height - point.y - offset
+        let row = offset > 0
+            ? max (-1, Int ((fromTop / cellDimension.height).rounded (.down)))
+            : Int (fromTop / cellDimension.height)
         var colValue = min (max (0, col), terminal.cols-1)
         let bufferRow = row + displayBuffer.yDisp
         let maxRow = max (0, displayBuffer.lines.count - 1)
@@ -4483,6 +4489,14 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
 
     /// Where a smooth scroll stands between rows, for the next frame.
     var smoothScrollState: SmoothScrollState?
+    /// How far below their places the rows on screen are drawn, in points, for the
+    /// scrollback scrolled to `yDisp`: the test the snapshot makes, so what the
+    /// mouse hits and the selection's outline land on the rows as they're drawn.
+    func smoothScrollOffset(yDisp: Int) -> CGFloat {
+        guard let state = smoothScrollState, state.yDisp == yDisp, state.offset > 0, yDisp > 0 else { return 0 }
+        return state.offset
+    }
+
     /// Where an eased wheel scroll is going, in rows from the top of the scrollback.
     private var smoothScrollTarget: CGFloat?
     private var smoothScrollTimer: Timer?

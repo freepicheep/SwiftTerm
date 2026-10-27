@@ -434,8 +434,10 @@ open class Terminal {
         set { _options = newValue }
     }
     private var _options: TerminalOptions
-    private let defaultCursorStyle: CursorStyle
-
+    /// The cursor style a program goes back to when it asks for the default
+    /// (`CSI 0 SP q`). Starts as `options.cursorStyle`; changing it leaves the
+    /// cursor on show alone.
+    public var defaultCursorStyle: CursorStyle
     /// Accept OSC 8 hyperlinks. Changes take effect without a terminal reset.
     /// Implicit URL and path detection remain available when this is false.
     public var enableOsc8Hyperlinks: Bool {

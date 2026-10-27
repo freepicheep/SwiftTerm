@@ -205,5 +205,15 @@ final class DcsTests {
         terminal.feed(text: "\(esc)P$q q\(esc)\\")
         #expect(delegate.sentData.last == Array("\(esc)P1$r4 q\(esc)\\".utf8))
     }
+
+    @Test func testDecscusrZeroRestoresChangedDefault() {
+        let terminal = Terminal(delegate: TerminalTestDelegate(), options: TerminalOptions())
+
+        terminal.defaultCursorStyle = .steadyBar
+        #expect(terminal.options.cursorStyle == .blinkBlock)
+
+        terminal.feed(text: "\(esc)[3 q\(esc)[0 q")
+        #expect(terminal.options.cursorStyle == .steadyBar)
+    }
 }
 #endif

@@ -3988,6 +3988,7 @@ final class MetalTerminalRenderer {
 
         let renderData = cursor.renderData
         let cursorColor = colorToSIMD(renderData.cursorColor)
+        let thickness = max(1, context.cursorThickness * scale)
 
         // A cursor on its way here (`TerminalView.cursorMotion`) is drawn where it
         // has got to, as a quad of its own, in place of the one in the cell.
@@ -3996,9 +3997,9 @@ final class MetalTerminalRenderer {
             let body: CGRect
             switch cursorStyle {
             case .blinkBar, .steadyBar:
-                body = CGRect(x: x0, y: y0, width: max(1, 2 * scale), height: y1 - y0)
+                body = CGRect(x: x0, y: y0, width: min(thickness, x1 - x0), height: y1 - y0)
             case .blinkUnderline, .steadyUnderline:
-                body = CGRect(x: x0, y: y0, width: x1 - x0, height: max(1, 2 * scale))
+                body = CGRect(x: x0, y: y0, width: x1 - x0, height: min(thickness, y1 - y0))
             case .blinkBlock, .steadyBlock:
                 body = CGRect(x: x0, y: y0, width: x1 - x0, height: y1 - y0)
             }
@@ -4064,7 +4065,7 @@ final class MetalTerminalRenderer {
                 return ([], [], [], moving)
             }
         case .blinkBar, .steadyBar:
-            let barWidth = max(1, 2 * scale)
+            let barWidth = min(thickness, x1 - x0)
             colorVertices.append(contentsOf: quadVertices(x0: CGFloat(x0),
                                                           y0: CGFloat(y0),
                                                           x1: CGFloat(x0 + barWidth),
@@ -4072,7 +4073,7 @@ final class MetalTerminalRenderer {
                                                           color: cursorColor))
             return (colorVertices, [], [], nil)
         case .blinkUnderline, .steadyUnderline:
-            let underlineHeight = max(1, 2 * scale)
+            let underlineHeight = min(thickness, y1 - y0)
             colorVertices.append(contentsOf: quadVertices(x0: CGFloat(x0),
                                                           y0: CGFloat(y0),
                                                           x1: CGFloat(x1),

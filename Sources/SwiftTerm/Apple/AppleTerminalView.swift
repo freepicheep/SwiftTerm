@@ -5029,14 +5029,23 @@ extension TerminalView {
     /// each part that hangs together. For drawing over the selection, such as a
     /// glow round it as it's copied. `nil` with nothing selected on screen.
     public func selectionOutline () -> CGPath? {
-        let runs = withTerminal { terminal -> [SelectionShape.Run] in
-            guard selection.active else { return [] }
+        let (runs, offset) = withTerminal { terminal -> ([SelectionShape.Run], CGFloat) in
+            guard selection.active else { return ([], 0) }
             let buffer = terminal.displayBuffer
             let top = buffer.yDisp
-            return (top..<min(buffer.lines.count, top + terminal.rows)).compactMap { row in
+#if os(macOS)
+            // Part way through a smooth scroll the rows are drawn lower, the row
+            // above the top showing in the gap.
+            let offset = smoothScrollOffset(yDisp: top)
+#else
+            let offset: CGFloat = 0
+#endif
+            let first = offset > 0 ? top - 1 : top
+            let runs = (first..<min(buffer.lines.count, top + terminal.rows)).compactMap { row in
                 selection.selectedColumnsRange(row: row, cols: terminal.cols)
                     .map { SelectionShape.Run(row: row - top, columns: $0) }
             }
+            return (runs, offset)
         }
         guard !runs.isEmpty else { return nil }
         let shape = SelectionShape(runs: runs,
@@ -5045,13 +5054,15 @@ extension TerminalView {
         let outline = shape.outline()
 #if os(iOS) || os(visionOS)
         // The rows on screen start where the scroll view is scrolled to.
-        var down = CGAffineTransform(translationX: 0, y: contentOffset.y)
+        var down = CGAffineTransform(translationX: 0, y: contentOffset.y + offset)
         return outline.copy(using: &down)
 #else
-        // The rows hang from the top of a view that counts up from its bottom.
-        guard !isFlipped else { return outline }
-        var up = CGAffineTransform(a: 1, b: 0, c: 0, d: -1, tx: 0, ty: bounds.height)
-        return outline.copy(using: &up)
+        // The rows hang from the top of a view that counts up from its bottom,
+        // as far below it as a smooth scroll draws them.
+        var place = isFlipped
+            ? CGAffineTransform(translationX: 0, y: offset)
+            : CGAffineTransform(a: 1, b: 0, c: 0, d: -1, tx: 0, ty: bounds.height - offset)
+        return outline.copy(using: &place)
 #endif
     }
 

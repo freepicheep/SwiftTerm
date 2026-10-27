@@ -575,6 +575,7 @@ struct FrameViewState: Sendable {
     /// Where a smooth scroll stands between rows (Metal on the Mac only).
     let smoothScroll: SmoothScrollState?
     let cursorMotion: CursorMotion?
+    let cursorThickness: CGFloat
 
     var effectiveForegroundColor: FrameColor { appearance.effectiveForegroundColor }
     var effectiveBackgroundColor: FrameColor { appearance.effectiveBackgroundColor }
@@ -624,6 +625,7 @@ struct FrameViewState: Sendable {
         smoothScroll = nil
 #endif
         cursorMotion = view.cursorMotion
+        cursorThickness = view.cursorThickness
     }
 }
 
@@ -707,6 +709,8 @@ struct SnapshotRenderContext {
     let selectionCornerRadius: CGFloat
     /// How the cursor moves between cells (`TerminalView.cursorMotion`).
     let cursorMotion: CursorMotion?
+    /// How thick a bar or underline cursor is, in points (`TerminalView.cursorThickness`).
+    let cursorThickness: CGFloat
     let cols: Int
 
     /// Identifies the values used to build attributed-string dictionaries.
@@ -770,6 +774,7 @@ struct SnapshotRenderContext {
         glyphFallbackProvider = viewState.glyphFallbackProvider
         selectionCornerRadius = viewState.selectionCornerRadius
         cursorMotion = viewState.cursorMotion
+        cursorThickness = viewState.cursorThickness
         self.cols = cols
 
         var identityHasher = Hasher()

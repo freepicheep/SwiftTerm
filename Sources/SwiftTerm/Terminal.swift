@@ -434,7 +434,10 @@ open class Terminal {
         set { _options = newValue }
     }
     private var _options: TerminalOptions
-    private let defaultCursorStyle: CursorStyle
+    /// The cursor style a program goes back to when it asks for the default
+    /// (`CSI 0 SP q`). Starts as `options.cursorStyle`; changing it leaves the
+    /// cursor on show alone.
+    public var defaultCursorStyle: CursorStyle
     
     // Selection services attached to this terminal.  The views own them; a
     // `SelectionService` owns its terminal, so this side must not retain, or the

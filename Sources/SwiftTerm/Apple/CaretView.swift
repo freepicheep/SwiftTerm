@@ -31,14 +31,15 @@ extension CaretView {
             return
         }
         context.setFillColor(cursorColor.cgColor)
+        let thickness = max(0.5, terminal.cursorThickness)
         let region: CGRect
         switch style {
         case .blinkBar, .steadyBar:
-            region = CGRect (x: 0, y: 0, width: 2, height: bounds.height)
+            region = CGRect (x: 0, y: 0, width: min(thickness, bounds.width), height: bounds.height)
         case .blinkBlock, .steadyBlock:
             region = bounds
         case .blinkUnderline, .steadyUnderline:
-            region = CGRect (x: 0, y: 0, width: bounds.width, height: 2)
+            region = CGRect (x: 0, y: 0, width: bounds.width, height: min(thickness, bounds.height))
         }
         context.fill([region])
 

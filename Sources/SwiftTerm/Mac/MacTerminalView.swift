@@ -1468,6 +1468,15 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
         didSet { frameDriver.markDirty() }
     }
 
+    /// How thick a bar or underline cursor is, in points: the bar's width and
+    /// the underline's height. A block fills its cell whatever this says.
+    public var cursorThickness: CGFloat = 2 {
+        didSet {
+            updateCaretView()
+            frameDriver.markDirty()
+        }
+    }
+
     /// Host-supplied fallback for symbol glyphs (for example Nerd Font icons)
     /// that the selected font does not contain. `nil`, the default, disables
     /// the feature entirely. See ``TerminalGlyphFallbackProvider``.

@@ -19,6 +19,7 @@ extension CaretView {
             return
         }
         context.saveGState()
+        defer { context.restoreGState() }
         context.clip(to: [bounds])
         context.setFillColor(TTColor.clear.cgColor)
         context.fill ([bounds])
@@ -58,13 +59,22 @@ extension CaretView {
         if let powerlineCodePoint,
            PowerlineRenderer.shouldRender(codePoint: powerlineCodePoint,
                                           customGlyphsEnabled: renderCustomBlockGlyphs) {
-            PowerlineRenderer.draw(codePoint: powerlineCodePoint,
-                                   in: context,
-                                   cellRect: bounds,
-                                   scaleX: terminal.backingScaleFactor(),
-                                   scaleY: terminal.backingScaleFactor(),
-                                   color: caretFG.cgColor)
-            context.restoreGState()
+            let caretScale = terminal.backingScaleFactor()
+#if os(macOS)
+            let underlineThickness = normalFont.underlineThickness
+#else
+            let underlineThickness: CGFloat = 0.63
+#endif
+            let minThicknessPx = max(1, Int(round(caretScale)))
+            let lineWidthPx = max(minThicknessPx,
+                                  Int(round(caretScale * underlineThickness * 1.35)))
+            PowerlineRenderer.drawCaret(codePoint: powerlineCodePoint,
+                                        in: context,
+                                        bounds: bounds,
+                                        renderMode: powerlineRenderMode,
+                                        scale: caretScale,
+                                        color: caretFG.cgColor,
+                                        lineWidthPx: lineWidthPx)
             return
         }
         for run in CTLineGetGlyphRuns(ctline) as? [CTRun] ?? [] {
@@ -99,7 +109,9 @@ extension CaretView {
                 }
                 return terminal.glyphSlotFit(font: ctRunFont, glyph: glyph, columnWidth: glyphColumnWidth)
             }
-            var positions = fits.map { CGPoint(x: $0.dx, y: yOffset + $0.dy) }
+            var positions = fits.map {
+                CellGeometry.pixelAlignedGlyphOrigin(CGPoint(x: $0.dx, y: yOffset + $0.dy), in: context)
+            }
             if fits.contains(where: { $0.scaleX != 1 || $0.scaleY != 1 }) {
                 for i in 0..<runGlyphsCount {
                     let fit = fits[i]
@@ -124,7 +136,6 @@ extension CaretView {
                 CTFontDrawGlyphs(runFont, runGlyphs, &positions, positions.count, context)
             }
         }
-        context.restoreGState()
     }
 }
 

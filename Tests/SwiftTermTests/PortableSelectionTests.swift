@@ -55,7 +55,7 @@ final class PortableSelectionTests: XCTestCase, TerminalDelegate {
         XCTAssertEqual(terminal.selectionText(selection), "bcd\nhij\nnop")
         // Letting go of the key mid-drag goes back to a run of text.
         terminal.updateSelection(selection, action: 1, column: 1, row: 2, rectangular: false)
-        XCTAssertFalse(selection.rectangular)
+        XCTAssertFalse(selection.isBlock)
         XCTAssertEqual(terminal.selectionText(selection), "def\nghijkl\nmn")
     }
 
@@ -66,7 +66,7 @@ final class PortableSelectionTests: XCTestCase, TerminalDelegate {
         terminal.updateSelection(selection, action: 1, column: 4, row: 2, rectangular: true)
         XCTAssertEqual(terminal.selectionText(selection), "b\nbcde\n")
         terminal.updateSelection(selection, action: 2)
-        XCTAssertFalse(selection.rectangular)
+        XCTAssertFalse(selection.isBlock)
     }
 
     func testWideCombiningAndEmojiCells() {

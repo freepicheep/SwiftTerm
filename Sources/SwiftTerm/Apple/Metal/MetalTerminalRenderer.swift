@@ -692,6 +692,7 @@ struct CacheSignature: Hashable {
     let glyphFallbackIdentity: UInt64
     let textBlinkVisible: Bool
     let linkHighlightMode: LinkHighlightMode
+    let enableOsc8Hyperlinks: Bool
     /// The modifier, in the highlight modes that read it.
     let linkModifierActive: Bool
     let customBlockGlyphs: Bool
@@ -1108,6 +1109,9 @@ final class MetalTerminalRenderer {
     private let cellTextGrayPipeline: MTLRenderPipelineState
     private let cellColorPipeline: MTLRenderPipelineState
     private let selectionPipeline: MTLRenderPipelineState
+    /// Cell backgrounds that replace the pass clear instead of blending over
+    /// it; see `SnapshotRenderContext.translucentCellBackgroundAlpha`.
+    private let cellBackgroundReplacePipeline: MTLRenderPipelineState
     private let sampler: MTLSamplerState
     private let textureLoader: MTKTextureLoader
     private let bufferPool: BufferPool
@@ -1338,7 +1342,13 @@ final class MetalTerminalRenderer {
                                                                            library: library,
                                                                            pixelFormat: pixelFormat,
                                                                            vertexName: "terminal_cursor_vertex",
-                                                                           fragmentName: "terminal_cursor_fragment") else {
+                                                                           fragmentName: "terminal_cursor_fragment"),
+              let cellBackgroundReplacePipeline = MetalTerminalRenderer.makeColorPipeline(device: device,
+                                                                                          library: library,
+                                                                                          pixelFormat: pixelFormat,
+                                                                                          vertexName: "terminal_cell_color_vertex",
+                                                                                          fragmentName: "terminal_color_fragment",
+                                                                                          blending: false) else {
             throw MetalError.pipelineCreationFailed("text/color/cell")
         }
         self.cursorPipeline = cursorPipeline
@@ -1349,6 +1359,7 @@ final class MetalTerminalRenderer {
         self.cellTextPipeline = cellTextPipeline
         self.cellTextGrayPipeline = cellTextGrayPipeline
         self.cellColorPipeline = cellColorPipeline
+        self.cellBackgroundReplacePipeline = cellBackgroundReplacePipeline
         let samplerDesc = MTLSamplerDescriptor()
         samplerDesc.minFilter = .linear
         samplerDesc.magFilter = .linear
@@ -1500,10 +1511,13 @@ final class MetalTerminalRenderer {
 #endif
         let encodeInterval = Profiling.begin(.metalEncode)
         defer { encodeInterval.end() }
+        // The drawable holds premultiplied values (the blend states assume so
+        // and Core Animation composites it that way), so a translucent default
+        // background is premultiplied here like every other color.
         let bgColor = colorToSIMD(renderContext.effectiveBackgroundColor)
-        passDescriptor.colorAttachments[0].clearColor = MTLClearColorMake(Double(bgColor.x),
-                                                                         Double(bgColor.y),
-                                                                         Double(bgColor.z),
+        passDescriptor.colorAttachments[0].clearColor = MTLClearColorMake(Double(bgColor.x * bgColor.w),
+                                                                         Double(bgColor.y * bgColor.w),
+                                                                         Double(bgColor.z * bgColor.w),
                                                                          Double(bgColor.w))
         passDescriptor.colorAttachments[0].loadAction = .clear
 
@@ -1541,8 +1555,11 @@ final class MetalTerminalRenderer {
         let viewport = SIMD4<Float>(Float(drawableSize.width), Float(drawableSize.height),
                                     0, -drawData.scrollOffsetPixels)
 
+        let backgroundPipeline = renderContext.translucentCellBackgroundAlpha == nil
+            ? cellColorPipeline : cellBackgroundReplacePipeline
         if let frame = drawData.frame {
-            drawFrameData(frame, selection: drawData.selectionCells, encoder: encoder, viewport: viewport)
+            drawFrameData(frame, selection: drawData.selectionCells, backgroundPipeline: backgroundPipeline,
+                          encoder: encoder, viewport: viewport)
         } else {
             let rows = drawData.rows
             drawImageRows(rows: rows,
@@ -1553,7 +1570,7 @@ final class MetalTerminalRenderer {
             drawVertexBuffers(rows: rows,
                               bufferKey: \.backgroundBuffer,
                               countKey: \.backgroundCount,
-                              pipeline: cellColorPipeline,
+                              pipeline: backgroundPipeline,
                               texture: nil,
                               encoder: encoder,
                               viewport: viewport)
@@ -1802,6 +1819,7 @@ final class MetalTerminalRenderer {
                                        glyphFallbackIdentity: context.glyphFallbackProvider?.cacheIdentity ?? 0,
                                        textBlinkVisible: context.textBlinkVisible,
                                        linkHighlightMode: context.linkHighlightMode,
+                                       enableOsc8Hyperlinks: context.enableOsc8Hyperlinks,
                                        linkModifierActive: linkModifierActive,
                                        customBlockGlyphs: context.customBlockGlyphs,
                                        antiAliasCustomBlockGlyphs: context.antiAliasCustomBlockGlyphs,
@@ -2149,7 +2167,7 @@ final class MetalTerminalRenderer {
                                                    cellWidthPx: itemWidthPx,
                                                    cellHeightPx: baseCellHeightPx,
                                                    scale: scale,
-                                                   baseThicknessPx: 0,
+                                                   baseThicknessPx: baseThicknessPx,
                                                    antiAlias: true) else {
                     continue
                 }
@@ -2735,10 +2753,11 @@ final class MetalTerminalRenderer {
             }
 
             for item in prepared.powerlineGlyphs {
-                let alignedOriginX = round(lineOriginPx.x) + CGFloat(item.column * baseCellWidthPx)
-                let alignedOriginY = round(lineOriginPx.y)
-                let x0 = alignedOriginX
-                let y0 = alignedOriginY
+                // Use the same origin as the background quads. Rounding
+                // just the separator leaves a half-pixel step at the joint
+                // when the view's height is fractional.
+                let x0 = lineOriginPx.x + CGFloat(item.column) * cellWidthPx
+                let y0 = lineOriginPx.y
                 let x1 = x0 + item.entrySize.width
                 let y1 = y0 + item.entrySize.height
                 let (tx0, ty0, tx1, ty1) = transformRect(x0: x0, y0: y0, x1: x1, y1: y1)
@@ -2782,11 +2801,18 @@ final class MetalTerminalRenderer {
             let y1 = lineOriginPx.y + cellHeightPx
             let (tx0, ty0, tx1, ty1) = transformRect(x0: x0, y0: y0, x1: x1, y1: y1)
             if let clipped = self.clipRect(tx0, ty0, tx1, ty1, clipRect) {
+                var color = background.color
+                if context.translucentCellBackgroundAlpha != nil {
+                    // Both text paths use this step. The replace pipeline
+                    // writes premultiplied colors to the drawable.
+                    color = SIMD4<Float>(color.x * color.w, color.y * color.w,
+                                         color.z * color.w, color.w)
+                }
                 backgroundCells.append(makeColorCell(x0: clipped.0,
                                                      y0: clipped.1,
                                                      x1: clipped.2,
                                                      y1: clipped.3,
-                                                     color: background.color))
+                                                     color: color))
             }
         }
 
@@ -2861,7 +2887,13 @@ final class MetalTerminalRenderer {
             let pxY = basePosY * scale + glyph.bearingY
             let y0 = pxY
             let y1 = pxY + glyph.height
-            let (tx0, ty0, tx1, ty1) = transformRect(x0: glyph.x0, y0: y0, x1: glyph.x1, y1: y1)
+            let (rawX0, rawY0, rawX1, rawY1) = transformRect(x0: glyph.x0, y0: y0, x1: glyph.x1, y1: y1)
+            // Snap in final device space, after DEC double-height transforms.
+            // Translate the quad as a whole so fitted glyph sizes stay intact.
+            let tx0 = rawX0.rounded()
+            let ty0 = rawY0.rounded()
+            let tx1 = tx0 + (rawX1 - rawX0)
+            let ty1 = ty0 + (rawY1 - rawY0)
             if let clipped = self.clipRect(tx0, ty0, tx1, ty1, glyph.u0, glyph.v0, glyph.u1, glyph.v1, clipRect) {
                 let cell = makeTextCell(x0: clipped.x0,
                                         y0: clipped.y0,
@@ -3455,6 +3487,7 @@ final class MetalTerminalRenderer {
                                        scaleX: scale,
                                        scaleY: scale,
                                        color: TTColor.white.cgColor,
+                                       lineWidthPx: baseThicknessPx,
                                        includeJoinOverdraw: false)
                 return true
             case UInt32(BoxDrawingRenderer.lowerBoundary)...UInt32(BoxDrawingRenderer.upperBoundary):
@@ -3922,11 +3955,12 @@ final class MetalTerminalRenderer {
     }
 
     private func drawFrameData(_ frame: FrameDrawData, selection: [SelectionCell],
+                               backgroundPipeline: MTLRenderPipelineState,
                                encoder: MTLRenderCommandEncoder, viewport: SIMD4<Float>) {
         drawImageBatches(frame.belowBackgroundImageDraws, encoder: encoder, viewport: viewport)
 
         drawCellBuffer(frame.backgroundCells,
-                       pipeline: cellColorPipeline,
+                       pipeline: backgroundPipeline,
                        texture: nil,
                        encoder: encoder,
                        viewport: viewport)
@@ -4197,13 +4231,16 @@ final class MetalTerminalRenderer {
         }
         if PowerlineRenderer.shouldRender(codePoint: UInt32(renderData.code),
                                           customGlyphsEnabled: renderData.customBlockGlyphs) {
-            let cursorCellWidthPx = max(1, Int(round(cellWidthPx * doublePosition * cursorColumnWidth)))
+            let cursorCellWidthPx = max(1, Int(round(cellWidthPx * cursorColumnWidth)))
             let cursorCellHeightPx = max(1, Int(round(cellHeightPx)))
+            let minThicknessPx = max(1, Int(round(scale)))
+            let baseThicknessPx = max(minThicknessPx,
+                                      Int(round(scale * context.fonts.underlineThickness() * 1.35)))
             if let entry = customGlyphEntry(codePoint: UInt32(renderData.code),
                                             cellWidthPx: cursorCellWidthPx,
                                             cellHeightPx: cursorCellHeightPx,
                                             scale: scale,
-                                            baseThicknessPx: 0,
+                                            baseThicknessPx: baseThicknessPx,
                                             antiAlias: true) {
                 let atlasSize = Float(grayscaleAtlas.size)
                 let u0 = Float(entry.region.x) / atlasSize
@@ -4211,9 +4248,25 @@ final class MetalTerminalRenderer {
                 let u1 = Float(entry.region.x + entry.region.width) / atlasSize
                 let v1 = Float(entry.region.y + entry.region.height) / atlasSize
                 let glyphX0 = Float(x0)
-                let glyphY0 = Float(y0)
-                let glyphX1 = glyphX0 + Float(entry.size.width)
-                let glyphY1 = glyphY0 + Float(entry.size.height)
+                // Reuse the row's base-size mask and apply its DEC line
+                // transform, rather than rasterizing a wider/narrower stroke
+                // under the cursor. The cursor clip selects the visible half
+                // of a double-height line.
+                let glyphX1 = glyphX0 + Float(entry.size.width * doublePosition)
+                let glyphY0: Float
+                let glyphHeight: Float
+                switch cursor.renderMode {
+                case .doubledTop:
+                    glyphY0 = Float(y0 - cellHeightPx)
+                    glyphHeight = Float(entry.size.height * 2)
+                case .doubledDown:
+                    glyphY0 = Float(y0)
+                    glyphHeight = Float(entry.size.height * 2)
+                case .single, .doubleWidth:
+                    glyphY0 = Float(y0)
+                    glyphHeight = Float(entry.size.height)
+                }
+                let glyphY1 = glyphY0 + glyphHeight
                 if let clipped = self.clipRect(glyphX0, glyphY0, glyphX1, glyphY1,
                                                u0, v0, u1, v1, cursorClip) {
                     glyphVerticesGray.append(contentsOf: glyphQuadVertices(x0: clipped.x0,
@@ -4305,10 +4358,9 @@ final class MetalTerminalRenderer {
                                            ? CTFontGetAscent(context.fonts.normal as CTFont) * scale : 0)
                 let basePos = CGPoint(x: lineOrigin.x + cellWidth * doublePosition * CGFloat(cursor.visualCol) + fit.dx * doublePosition,
                                       y: lineOrigin.y + yOffset + ctPos.y + fit.dy)
-                let pxX = basePos.x * scale + entry.bearing.x * fit.scaleX
-                let pxY = basePos.y * scale + entry.bearing.y * fit.scaleY
-                let x0 = Float(pxX)
-                let y0 = Float(pxY)
+                // The block cursor uses the same pixel grid as the row glyphs.
+                let x0 = Float(basePos.x * scale + entry.bearing.x * fit.scaleX).rounded()
+                let y0 = Float(basePos.y * scale + entry.bearing.y * fit.scaleY).rounded()
                 let x1 = x0 + Float(entry.size.width * fit.scaleX)
                 let y1 = y0 + Float(entry.size.height * fit.scaleY)
 
@@ -4779,7 +4831,8 @@ final class MetalTerminalRenderer {
                                           library: MTLLibrary,
                                           pixelFormat: MTLPixelFormat,
                                           vertexName: String,
-                                          fragmentName: String) -> MTLRenderPipelineState? {
+                                          fragmentName: String,
+                                          blending: Bool = true) -> MTLRenderPipelineState? {
         guard let vertex = library.makeFunction(name: vertexName),
               let fragment = library.makeFunction(name: fragmentName) else {
             return nil
@@ -4789,7 +4842,9 @@ final class MetalTerminalRenderer {
         descriptor.fragmentFunction = fragment
         let attachment = descriptor.colorAttachments[0]!
         attachment.pixelFormat = pixelFormat
-        attachment.isBlendingEnabled = true
+        // Without blending the fragment color is written as is, so callers
+        // pass premultiplied colors.
+        attachment.isBlendingEnabled = blending
         attachment.rgbBlendOperation = .add
         attachment.alphaBlendOperation = .add
         attachment.sourceRGBBlendFactor = .sourceAlpha

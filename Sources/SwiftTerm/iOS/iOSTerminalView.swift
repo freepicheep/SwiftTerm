@@ -247,6 +247,18 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         }
     }
 
+    /// Overrides only the underline of highlighted OSC 8 and implicit links.
+    /// Text and strikethrough keep their existing colors. This takes precedence
+    /// over ``linkColor`` for the underline; `nil` (the default) preserves it.
+    /// Selection highlighting still takes precedence over link colors.
+    public var linkUnderlineColor: UIColor? {
+        didSet {
+            urlAttributes.removeAll()
+            withTerminal { $0.updateFullScreen() }
+            frameDriver.markDirty()
+        }
+    }
+
     private var lastReportedLink: String?
     var commandActive = false
     private var activeCommandKeys: Set<UIKeyboardHIDUsage> = []
@@ -833,6 +845,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     }
     
     /// This controls whether the backspace should send ^? or ^H, the default is ^?
+    /// The backspace key also sends ^H while the application sets DECBKM (`CSI ? 67 h`).
     public var backspaceSendsControlH: Bool = false
 
     /// If this variable is set, this simulates the control key being pressed, it auto resets after we send data
@@ -1419,9 +1432,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                 withTerminal { _ in
                     // With a hardware keyboard, Option held while dragging
                     // selects a block, as on the Mac.
-                    if selection.selectionMode == .character {
-                        selection.rectangular = gestureRecognizer.modifierFlags.contains(.alternate)
-                    }
+                    selection.setBlock(gestureRecognizer.modifierFlags.contains(.alternate))
                     selection.pivotExtend(bufferPosition: hit)
                 }
                 gestureRecognizer.setTranslation(CGPoint.zero, in: self)
@@ -1845,8 +1856,26 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         set { progressBarView?.tint = newValue }
     }
     
-    /// Controls weather to use high ansi colors, if false terminal will use bold text instead of high ansi colors
-    public var useBrightColors: Bool = true
+    /// Promotes bold ANSI foreground text to bright colors. When disabled,
+    /// `collapseBrightColorsToBase` controls whether explicit bright indexes
+    /// are also collapsed and rendered with a bold font.
+    public var useBrightColors: Bool = true {
+        didSet {
+            guard useBrightColors != oldValue else { return }
+            colorsChanged ()
+        }
+    }
+
+    /// Preserves the historical foreground-index collapse when `useBrightColors`
+    /// is false. Set this to false to keep explicit ANSI indexes (including the
+    /// 256-color palette) while disabling automatic bright colors for bold text.
+    /// The default is true for compatibility.
+    public var collapseBrightColorsToBase: Bool = true {
+        didSet {
+            guard collapseBrightColorsToBase != oldValue else { return }
+            colorsChanged ()
+        }
+    }
 
     /// The least contrast, as a WCAG ratio from 1 to 21, that text keeps against its background. Text whose colors
     /// fall below it, such as colors a program picked for a background of the other brightness, is darkened or
@@ -2551,12 +2580,13 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     }
     private func kittyEncoder() -> KittyKeyboardEncoder {
         let terminalState = withTerminal { terminal in
-            (terminal.keyboardEnhancementFlags, terminal.applicationCursor, terminal.applicationKeypad)
+            (terminal.keyboardEnhancementFlags, terminal.applicationCursor, terminal.applicationKeypad,
+             terminal.backarrowKeyMode)
         }
         return KittyKeyboardEncoder(flags: terminalState.0,
                                     applicationCursor: terminalState.1,
                                     applicationKeypad: terminalState.2,
-                                    backspaceSendsControlH: backspaceSendsControlH)
+                                    backspaceSendsControlH: backspaceSendsControlH || terminalState.3)
     }
 
     private func kittyModifiers(from key: UIKey, includeOption: Bool) -> KittyKeyboardModifiers {
@@ -2933,7 +2963,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     private func sendBackspaceKey() {
         let flags = withTerminal { $0.keyboardEnhancementFlags }
         if flags.isEmpty {
-            send([backspaceSendsControlH ? 8 : 0x7f])
+            send([backspaceKeySendsControlH ? 8 : 0x7f])
             return
         }
         let pendingEvent = pendingKittyKeyEvent
@@ -4161,13 +4191,18 @@ extension TerminalView: UIAccessibilityReadingContent {
         terminal.terminalLock.preconditionLocked()
         var endingLine = lineNumber
         while (endingLine < terminal.buffer.lines.count - 1) {
-            let start = Position(col: 0, row: endingLine)
-            let end = Position(col: terminal.buffer.lines[endingLine].count, row: endingLine)
-            let text =  terminal.getDisplayText(start: start, end: end)
-            if (text.count != terminal.buffer.lines[endingLine].count || text.last != " ")
-            && !terminal.buffer.lines[endingLine + 1].isWrapped {
-                // this line is incomplete. We stop here.
-                break
+            // A row that wraps onto the next continues whatever its text, so
+            // read the text only where the line could end: reading every row
+            // of a line wrapped over thousands of them made each VoiceOver
+            // query of it slow.
+            if !terminal.buffer.lines[endingLine + 1].isWrapped {
+                let start = Position(col: 0, row: endingLine)
+                let end = Position(col: terminal.buffer.lines[endingLine].count, row: endingLine)
+                let text =  terminal.getDisplayText(start: start, end: end)
+                if text.count != terminal.buffer.lines[endingLine].count || text.last != " " {
+                    // this line is incomplete. We stop here.
+                    break
+                }
             }
             endingLine += 1
         }

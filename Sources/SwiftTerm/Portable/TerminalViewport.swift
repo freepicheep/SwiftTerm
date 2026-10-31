@@ -64,11 +64,15 @@ extension Terminal {
     /// both the anchor cell and the target cell, including wide continuations.
     /// Actions: begin=0, extend=1, clear=2, all=3.
     /// Begin modes: character=0, word=1, row=2, Shift extension=3.
+    /// `rectangular` makes a character selection a block: the same columns on
+    /// every row, as an Alt- or Option-drag selects. Pass it on every begin and
+    /// extend, so pressing or letting go of the key mid-drag switches.
     /// The endpoint mode belongs to the service: build it with
     /// `SelectionService(terminal:exclusiveEnd:)` and keep that choice.
     @discardableResult
     public func updateSelection(_ selection: SelectionService, action: UInt32,
-                                column: Int = 0, row: Int = 0, mode: UInt32 = 0) -> Bool {
+                                column: Int = 0, row: Int = 0, mode: UInt32 = 0,
+                                rectangular: Bool = false) -> Bool {
         terminalLock.withLock {
             guard selection.terminal === self, action <= 3, mode <= 3 else { return false }
             if action == 2 { selection.selectNone(); return true }
@@ -76,7 +80,7 @@ extension Terminal {
             guard column >= 0, column < cols, row >= 0, row < rows else { return false }
             let position = Position(col: column, row: row + displayBuffer.yDisp)
             guard position.row < displayBuffer.lines.count else { return false }
-            selection.updatePointerSelection(position, begin: action == 0, mode: mode)
+            selection.updatePointerSelection(position, begin: action == 0, mode: mode, rectangular: rectangular)
             return true
         }
     }

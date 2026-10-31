@@ -1107,9 +1107,9 @@ public class SelectionService: CustomDebugStringConvertible {
         }
         return rows.joined (separator: "\n")
     }
-    
+
     public var debugDescription: String {
-        return "[Selection (active=\(active), start=\(start) end=\(end) hasSR=\(hasSelectionRange) pivot=\(pivot?.debugDescription ?? "nil")]"
+        return "[Selection (active=\(active), start=\(start) end=\(end) hasSR=\(hasSelectionRange) pivot=\(pivot?.debugDescription ?? "nil")\(isBlock ? " block" : "")]"
     }
 }
 
@@ -1127,7 +1127,18 @@ extension SelectionService {
         return (first, Position(col: min(terminal.cols, first.col + width), row: first.row))
     }
 
-    func updatePointerSelection(_ position: Position, begin: Bool, mode: UInt32) {
+    /// Turns a character selection into a block or back while it's being
+    /// dragged, for hosts that follow a held modifier (iOS with a hardware
+    /// keyboard, portable clients).
+    func setBlock(_ block: Bool) {
+        guard selectionMode == .character, block != isBlock else { return }
+        isBlock = block
+        if active {
+            terminal.tdel?.selectionChanged (source: terminal)
+        }
+    }
+
+    func updatePointerSelection(_ position: Position, begin: Bool, mode: UInt32, rectangular: Bool = false) {
         let cell = pointerCell(position)
         if begin && mode != 3 {
             switch mode {
@@ -1144,12 +1155,24 @@ extension SelectionService {
                 startSelection(row: position.row - terminal.displayBuffer.yDisp, col: cell.start.col)
                 end = cell.end
                 pivot = cell.start
+                isBlock = rectangular
             }
             setActiveAndNotify()
             return
         }
         guard active else {
-            if begin { updatePointerSelection(position, begin: true, mode: 0) }
+            if begin { updatePointerSelection(position, begin: true, mode: 0, rectangular: rectangular) }
+            return
+        }
+        setBlock(rectangular)
+        if isBlock {
+            // Both the anchor's cell and the pointer's, and every column
+            // between, on every row from one to the other.
+            let anchor = pointerCell(pivot ?? start)
+            start = Position(col: min(anchor.start.col, cell.start.col), row: anchor.start.row)
+            end = Position(col: max(anchor.end.col, cell.end.col), row: cell.start.row)
+            pivot = anchor.start
+            setActiveAndNotify()
             return
         }
         if selectionMode != .character {

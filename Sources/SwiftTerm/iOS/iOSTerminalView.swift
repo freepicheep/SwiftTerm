@@ -1429,7 +1429,12 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             let hit = calculateTapHit(gesture: gestureRecognizer).grid
             if withTerminal({ _ in selection.active }) {
                 stopSelectionTimer()
-                withTerminal { _ in selection.pivotExtend(bufferPosition: hit) }
+                withTerminal { _ in
+                    // With a hardware keyboard, Option held while dragging
+                    // selects a block, as on the Mac.
+                    selection.setBlock(gestureRecognizer.modifierFlags.contains(.alternate))
+                    selection.pivotExtend(bufferPosition: hit)
+                }
                 gestureRecognizer.setTranslation(CGPoint.zero, in: self)
                 if absoluteY < 0 || absoluteY > bounds.height {
                     startSelectionTimer {

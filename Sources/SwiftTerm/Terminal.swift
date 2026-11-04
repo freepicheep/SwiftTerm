@@ -870,7 +870,7 @@ open class Terminal {
     /// contents are entirely under the control of the remote application, and require the terminal to be trusted
     /// (see the `isProcessTrusted` method in the `TerminalDelegate`).  When this is set the
     /// `hostCurrentDirectoryUpdated` method on the delegate is invoked.
-    public private(set) var hostCurrentDirectory: String? = nil
+    public internal(set) var hostCurrentDirectory: String? = nil
     
     /// This variable if set, contains an URI representing the host and current document of the process
     /// running in the terminal.   It might be nil, or might not be correct, the

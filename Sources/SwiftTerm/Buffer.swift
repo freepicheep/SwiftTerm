@@ -919,6 +919,18 @@ public final class Buffer {
         // SetupTabStops ()
     }
     
+    /// Replaces this cleared buffer's rows with `newLines`, oldest first, the last
+    /// `rows` of them being the screen, which it shows. Short ones are made up with
+    /// blank rows at the bottom. `semanticGroups` is how many prompt groups they carry.
+    func restore(lines newLines: [BufferLine], semanticGroups: UInt64) {
+        for line in newLines { _lines.push(line) }
+        let packedBlank = getPackedBlankCell(attribute: CharData.defaultAttr)
+        while _lines.count < rows { _lines.push(getBlankLine(packedBlank: packedBlank)) }
+        yBase = _lines.count - rows
+        yDisp = yBase
+        semanticGroupCounter = semanticGroups
+    }
+
     public func softReset ()
     {
         savedAttr = CharData.defaultAttr

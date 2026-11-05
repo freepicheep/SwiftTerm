@@ -289,3 +289,41 @@ struct GhosttySnapshotTests {
         #expect(restored.hostCurrentDirectory?.hasSuffix("/tmp/place") == true)
     }
 }
+
+#if os(macOS)
+import AppKit
+
+/// A view shows a snapshot as its terminal would hold it, and goes on from there.
+@Test @MainActor func viewRestoresASnapshot() throws {
+    let snapshot = try GhosttySnapshot(bytes: bytes(hex: completeReference))
+    let host = Host()
+    let expected = terminal(host)
+    expected.restore(from: snapshot)
+
+    let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 640, height: 400))
+    view.restore(from: snapshot)
+    let shown = view.terminal!
+    #expect(shown.cols == snapshot.terminal.columns && shown.rows == snapshot.terminal.rows)
+    for row in 0..<shown.rows {
+        #expect(shown.getLine(row: row)?.translateToString(trimRight: true) == expected.getLine(row: row)?.translateToString(trimRight: true))
+    }
+    // Its grid is a few columns wide.
+    view.feed(text: "\r\nZ")
+    #expect(shown.getLine(row: shown.buffer.y)?.translateToString(trimRight: true) == "Z")
+}
+
+/// Without the host's colors, a view keeps the theme it was given.
+@Test @MainActor func viewKeepsItsThemeThroughARestore() throws {
+    let snapshot = try GhosttySnapshot(bytes: bytes(hex: completeReference))
+    let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 640, height: 400))
+    let (background, foreground) = (NSColor(srgbRed: 0.1, green: 0.2, blue: 0.3, alpha: 1), NSColor(srgbRed: 0.9, green: 0.8, blue: 0.7, alpha: 1))
+    view.nativeBackgroundColor = background
+    view.nativeForegroundColor = foreground
+    RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
+    view.restore(from: snapshot, options: .init(hostColors: false))
+    RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
+    #expect(view.nativeBackgroundColor == background)
+    #expect(view.nativeForegroundColor == foreground)
+    #expect(view.terminal.backgroundColor == background.getTerminalColor())
+}
+#endif

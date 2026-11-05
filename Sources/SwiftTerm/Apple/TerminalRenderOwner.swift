@@ -260,6 +260,14 @@ final class TerminalRenderOwner: Sendable {
         }
     }
 
+    /// Puts a snapshot in place of what the terminal holds, as a feed does: under the terminal
+    /// lock, with search and selection told.
+    func restore (_ snapshot: GhosttySnapshot, options: GhosttySnapshotRestoreOptions) -> Bool? {
+        feedTransaction { terminal in
+            terminal.restore(from: snapshot, options: options)
+        }
+    }
+
     private func feedTransaction(_ body: (Terminal) -> Void) -> Bool? {
         guard let session = currentSession() else { return nil }
         let terminal = session.terminal

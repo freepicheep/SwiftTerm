@@ -4741,6 +4741,20 @@ extension TerminalView {
         feedSender.feed(text: text)
     }
 
+    /// Replaces what the terminal holds with a snapshot of another terminal, as
+    /// ``Terminal/restore(from:options:)`` does, and shows it. Output that follows the snapshot
+    /// goes to ``feed(byteArray:)`` as usual. This can be invoked from a background thread.
+    public nonisolated func restore (from snapshot: GhosttySnapshot, options: GhosttySnapshotRestoreOptions = .init())
+    {
+        frameSignal.markDirty()
+        _ = renderOwner.restore(snapshot, options: options)
+        frameSignal.markDirty()
+        // The history it brought is news to the scroller.
+        onMain { [weak self] in
+            self?.updateScroller()
+        }
+    }
+
     /// Current OSC 7501 records. This value snapshot is safe to read without
     /// the terminal lock. It includes inherited program names.
     public nonisolated var programStatusRecords: [TerminalProgramStatus] {

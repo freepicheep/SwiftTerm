@@ -1,5 +1,5 @@
 // Generated from a Ghostty core: each scenario's output, and the snapshot Ghostty made of it.
-// The terminal is 40 columns by 10 rows.
+// The terminal is 40 columns by 10 rows. Regenerate with Tools/generate_ghostty_snapshot_fixtures.py.
 
 let ghosttySnapshotScenarios: [(name: String, output: String, snapshot: String)] = [
     ("plain", "aGVsbG8NCndvcmxk",
